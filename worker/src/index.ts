@@ -93,6 +93,21 @@ async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): P
     return;
   }
 
+  // Dedupe: only fire on the *transition into* Todo (AI), not on every update
+  // while the issue sits there. Linear sends multiple events for a new issue
+  // (create + updates as project/priority/etc. settle) — without this, each
+  // one re-fires pickup and we get duplicate Plan comments. See W-88.
+  if (event.action === "update") {
+    const uf = event.updatedFrom;
+    if (uf === undefined || uf === null) {
+      // Defensive: better one extra plan than zero. Log so regressions are visible.
+      console.log(`trace=${trace} issue ${issue.identifier}: update event missing updatedFrom — firing anyway`);
+    } else if (!("state" in uf) && !("stateId" in uf)) {
+      console.log(`trace=${trace} issue ${issue.identifier}: update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
+      return;
+    }
+  }
+
   const projectId = issue.projectId || issue.project?.id;
   if (!projectId) {
     console.log(`trace=${trace} issue ${issue.identifier}: no project, skipping`);
@@ -105,6 +120,7 @@ async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): P
     return;
   }
 
+  console.log(`trace=${trace} issue ${issue.identifier}: firing linear-pickup (action=${event.action})`);
   await fireDispatch(repo, "linear-pickup", { issue_id: issue.identifier, trace_id: trace }, env, trace);
 }
 
@@ -284,6 +300,7 @@ type LinearEvent = {
   type: string;
   action: string;
   data: unknown;
+  updatedFrom?: Record<string, unknown> | null;
 };
 
 type LinearIssue = {
