@@ -8,12 +8,11 @@ on:
       LINEAR_APP_TOKEN:
         required: true
 
-concurrency:
-  group: linear-pickup-${{ github.event.client_payload.issue_id }}
-  cancel-in-progress: false
-
 jobs:
   pickup:
+    concurrency:
+      group: linear-pickup-${{ github.event.client_payload.issue_id }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
