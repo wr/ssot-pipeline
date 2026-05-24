@@ -1,0 +1,45 @@
+name: pr-review (reusable)
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} ("${{ github.event.pull_request.title }}").
+
+            Focus on:
+            - Correctness bugs and logic errors
+            - Security issues (injection, secrets, auth bypass)
+            - Adherence to the project's CLAUDE.md conventions
+            - Things that would surprise a future reader
+
+            Post findings as inline review comments on specific lines via the GitHub MCP. Group nits into a single summary comment.
+
+            If you find blocking issues, request changes. Otherwise approve with a brief summary.
+
+            Skip stylistic preferences that aren't documented as conventions.
+          claude_args: |
+            --permission-mode bypassPermissions
+            --allowedTools mcp__github__* Bash Read Grep Glob

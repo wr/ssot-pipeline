@@ -1,0 +1,15 @@
+name = "ssot-pipeline"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+# Set via `wrangler secret put <NAME>` before deploying:
+#   LINEAR_WEBHOOK_SECRET    HMAC secret from Linear webhook config
+#   LINEAR_APP_TOKEN         OAuth app token (actor=app) for Linear GraphQL queries
+#   LINEAR_PROJECT_TO_REPO   JSON like {"<project-uuid>":"owner/repo"}
+#   WELLS_LINEAR_USER_ID     Filter approvals to this user
+#   GITHUB_DISPATCH_TOKEN    Fine-grained PAT with Actions:write on target repos
+
+[vars]
+TODO_AI_STATE_NAME = "Todo (AI)"
+PLAN_COMMENT_MARKER = "<!-- ssot:plan -->"
+APPROVAL_EMOJI = "+1"

@@ -1,0 +1,77 @@
+name: linear-implement (reusable)
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      LINEAR_APP_TOKEN:
+        required: true
+
+concurrency:
+  group: linear-implement-${{ github.event.client_payload.issue_id }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "claude[bot]"
+          git config user.email "claude[bot]@users.noreply.github.com"
+
+      - name: Write MCP config
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+        run: |
+          cat > /tmp/mcp.json <<EOF
+          {
+            "mcpServers": {
+              "linear": {
+                "type": "sse",
+                "url": "https://mcp.linear.app/sse",
+                "headers": {
+                  "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
+                }
+              }
+            }
+          }
+          EOF
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You're implementing Linear issue ${{ github.event.client_payload.issue_id }}, which has an approved plan.
+
+            Operating identity: @claude (Linear) + claude[bot] (GitHub). Don't @-mention.
+
+            Steps:
+            1. Fetch the issue (mcp__linear__get_issue) and its comments (mcp__linear__list_comments).
+            2. Find the approved plan: the comment whose body starts with `<!-- ssot:plan -->`. Read it carefully.
+            3. Implement per the plan. Use Edit/Write/Bash freely.
+            4. Create a branch named `wells/<issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. wells/w-65-add-hello-script). Branch from main.
+            5. Commit your changes. Commit message should focus on *why*. Include `Refs: ${{ github.event.client_payload.issue_id }}` as a trailer.
+            6. Push the branch.
+            7. Open a ready (non-draft) PR with `gh pr create`:
+               - Title = issue title
+               - Body: brief summary, test plan checklist, and `Refs ${{ github.event.client_payload.issue_id }}` on its own line
+            8. Attach the PR URL to the Linear issue (mcp__linear__create_attachment with the PR URL as url and the PR title as title).
+            9. Set Linear issue state to "In Review" (mcp__linear__save_issue).
+            10. Post a brief Linear comment: "Ready for review: <PR-url>".
+
+            If anything blocks you (plan unclear, tests fail, can't push): post a Linear comment describing the blocker, set state back to "In Progress", and stop. Don't open a broken PR.
+          claude_args: |
+            --permission-mode bypassPermissions
+            --mcp-config /tmp/mcp.json
+            --allowedTools mcp__linear__* mcp__github__* Bash Read Write Edit Grep Glob

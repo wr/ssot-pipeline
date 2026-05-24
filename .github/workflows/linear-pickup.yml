@@ -1,0 +1,66 @@
+name: linear-pickup (reusable)
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      LINEAR_APP_TOKEN:
+        required: true
+
+concurrency:
+  group: linear-pickup-${{ github.event.client_payload.issue_id }}
+  cancel-in-progress: false
+
+jobs:
+  pickup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Write MCP config
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+        run: |
+          cat > /tmp/mcp.json <<EOF
+          {
+            "mcpServers": {
+              "linear": {
+                "type": "sse",
+                "url": "https://mcp.linear.app/sse",
+                "headers": {
+                  "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
+                }
+              }
+            }
+          }
+          EOF
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You're picking up Linear issue ${{ github.event.client_payload.issue_id }}.
+
+            Operating identity: @claude (Linear OAuth app, actor=app). Don't @-mention anyone.
+
+            Steps:
+            1. Fetch the issue with mcp__linear__get_issue.
+            2. Read this repo's CLAUDE.md and any relevant code to understand context. Don't write code in this step.
+            3. Write a clear, actionable plan. Plan should have: Context, Approach, Files to change, Verification.
+            4. Post the plan as a top-level comment on the issue via mcp__linear__save_comment. The comment body MUST start with this exact line, on its own:
+
+               <!-- ssot:plan -->
+
+               Then a `## Plan` header, then the plan content.
+            5. Set the issue state to "Plan Review" via mcp__linear__save_issue.
+
+            Do not open PRs, do not commit code, do not @-mention. Just plan and comment.
+          claude_args: |
+            --permission-mode bypassPermissions
+            --mcp-config /tmp/mcp.json
+            --allowedTools mcp__linear__* Bash Read Grep Glob
