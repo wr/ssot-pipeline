@@ -2,6 +2,11 @@ name: pr-review (reusable)
 
 on:
   workflow_call:
+    inputs:
+      effort:
+        description: 'Review depth: low (fast pass, docs PRs), medium (default), high (security-sensitive or large PRs)'
+        type: string
+        default: 'medium'
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -19,14 +24,38 @@ jobs:
       id-token: write
     env:
       PR: ${{ github.event.pull_request.number }}
+      EFFORT: ${{ inputs.effort || 'medium' }}
     steps:
       - name: Trace
-        run: echo "🔗 pr=#${PR} title='${{ github.event.pull_request.title }}'"
+        run: echo "🔗 pr=#${PR} effort=${EFFORT} title='${{ github.event.pull_request.title }}'"
 
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Resolve effort settings
+        id: effort
+        run: |
+          case "${EFFORT}" in
+            low)
+              # Sonnet: fast/cheap pass for docs or tiny PRs
+              echo "model=claude-sonnet-4-6" >> "$GITHUB_OUTPUT"
+              echo "max_turns=10" >> "$GITHUB_OUTPUT"
+              ;;
+            high)
+              # Opus: deeper reasoning for security-sensitive or large PRs;
+              # costs ~3x Sonnet — only use when quality gain justifies it
+              echo "model=claude-opus-4-7" >> "$GITHUB_OUTPUT"
+              echo "max_turns=30" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # medium (default): Sonnet gives the right cost/latency tradeoff
+              # for routine reviews; revisit if Opus quality wins prove worth the spend
+              echo "model=claude-sonnet-4-6" >> "$GITHUB_OUTPUT"
+              echo "max_turns=20" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       - uses: anthropics/claude-code-action@v1
         with:
@@ -35,20 +64,23 @@ jobs:
           prompt: |
             Review pull request #${{ env.PR }} ("${{ github.event.pull_request.title }}").
 
-            Focus on:
-            - Correctness bugs and logic errors
-            - Security issues (injection, secrets, auth bypass)
-            - Adherence to the project's CLAUDE.md conventions
-            - Things that would surprise a future reader
+            Before looking at the diff, read the project's CLAUDE.md file to understand its conventions and rules.
 
-            Post findings as inline review comments on specific lines via the GitHub MCP. Group nits into a single summary comment.
+            Label every finding with exactly one severity:
+            - `blocking` — must-fix: correctness bug, security issue, or explicit CLAUDE.md violation. Request changes if any exist.
+            - `nit` — style or preference not documented as a required convention. Group ALL nits into one summary comment; never post nits inline.
+            - `question` — clarifying ask; no action required from the author.
 
-            If you find blocking issues, request changes. Otherwise approve with a brief summary.
+            Skip any finding you are less than 70% confident in. Uncertain findings add noise, not signal.
 
-            Skip stylistic preferences that aren't documented as conventions.
+            Post `blocking` and `question` findings as inline review comments on the specific lines via the GitHub MCP. Post all nits as a single summary comment.
+
+            Approve/reject rule: use REQUEST_CHANGES only if there is at least one `blocking` finding. Otherwise APPROVE with a brief summary of what looks good and all nits grouped at the end.
           claude_args: |
             --permission-mode bypassPermissions
-            --allowedTools mcp__github__* Bash Read Grep Glob
+            --allowedTools mcp__github__* Read Grep Glob
+            --model ${{ steps.effort.outputs.model }}
+            --max-turns ${{ steps.effort.outputs.max_turns }}
 
       - name: Verify outcome
         if: always()
