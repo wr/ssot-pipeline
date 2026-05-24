@@ -15,8 +15,7 @@ permissions:
   issues: write
   id-token: write
   actions: write
-  workflows: write
-  
+
 jobs:
   linear-pickup:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'linear-pickup'
