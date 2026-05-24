@@ -40,16 +40,20 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
     return new Response("invalid json", { status: 400 });
   }
 
+  console.log(`Webhook received: type=${event.type} action=${event.action}`);
   try {
     if (event.type === "Issue" && (event.action === "update" || event.action === "create")) {
       await handleIssueUpdate(event, env);
     } else if (event.type === "Reaction" && event.action === "create") {
       await handleReactionCreate(event, env);
+    } else {
+      console.log(`Ignored: ${event.type}.${event.action}`);
     }
     return new Response("ok");
   } catch (err) {
-    console.error("Handler error:", err);
-    return new Response("handler error", { status: 500 });
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.error("Handler error:", msg, err);
+    return new Response(`handler error: ${msg}`, { status: 500 });
   }
 }
 
@@ -147,18 +151,32 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
   const resp = await fetch("https://api.linear.app/graphql", {
     method: "POST",
     headers: {
-      Authorization: env.LINEAR_APP_TOKEN,
+      Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ query, variables: { id: commentId } }),
   });
 
+  const text = await resp.text();
   if (!resp.ok) {
-    console.error(`Linear fetch failed: ${resp.status}`);
+    console.error(`Linear fetch failed: ${resp.status} ${text}`);
     return null;
   }
 
-  const data = (await resp.json()) as { data?: { comment?: LinearComment } };
+  let data: { data?: { comment?: LinearComment }; errors?: unknown };
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    console.error(`Linear response not JSON: ${text}`);
+    return null;
+  }
+
+  if (data.errors) {
+    console.error(`Linear GraphQL errors:`, JSON.stringify(data.errors));
+    return null;
+  }
+
+  console.log(`Fetched comment ${commentId}: bodyLen=${data.data?.comment?.body.length}, issue=${data.data?.comment?.issue?.identifier}`);
   return data.data?.comment ?? null;
 }
 
