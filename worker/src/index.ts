@@ -41,7 +41,7 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
   }
 
   try {
-    if (event.type === "Issue" && event.action === "update") {
+    if (event.type === "Issue" && (event.action === "update" || event.action === "create")) {
       await handleIssueUpdate(event, env);
     } else if (event.type === "Reaction" && event.action === "create") {
       await handleReactionCreate(event, env);

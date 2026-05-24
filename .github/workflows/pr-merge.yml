@@ -6,12 +6,11 @@ on:
       LINEAR_APP_TOKEN:
         required: true
 
-concurrency:
-  group: pr-merge-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
-
 jobs:
   merge:
+    concurrency:
+      group: pr-merge-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     # Only proceed for human approvals from the maintainer
     if: github.event.review.user.login == 'wr'
     runs-on: ubuntu-latest

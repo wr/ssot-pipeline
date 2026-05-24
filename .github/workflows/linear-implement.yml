@@ -8,12 +8,11 @@ on:
       LINEAR_APP_TOKEN:
         required: true
 
-concurrency:
-  group: linear-implement-${{ github.event.client_payload.issue_id }}
-  cancel-in-progress: false
-
 jobs:
   implement:
+    concurrency:
+      group: linear-implement-${{ github.event.client_payload.issue_id }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
