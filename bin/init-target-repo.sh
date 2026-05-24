@@ -123,18 +123,19 @@ cat <<EOF
 
 Next steps (manual, one-time per project):
 
-1. Add this mapping to the Worker's LINEAR_PROJECT_TO_REPO secret:
+1. Add this mapping to $REPO_ROOT/config/pipeline.json (\`project_to_repo\` object):
 
    "$LINEAR_PROJECT_ID": "$REPO_FULL"
 
-   To update:
-     cd $REPO_ROOT/worker
-     wrangler secret put LINEAR_PROJECT_TO_REPO
-     # paste the full updated JSON when prompted
+   Then commit the config change and redeploy the Worker:
+     cd $REPO_ROOT/worker && npx wrangler deploy
 
-2. In Linear, scope the OAuth app webhook to include this project (Settings → API → OAuth Applications → claude → Webhooks).
+2. Confirm the workspace-level Linear webhook covers this project's events
+   (Settings → API → Webhooks). Default scope = all projects in the workspace.
 
 3. Commit and push the new workflow stub + CLAUDE.md changes in $TARGET_REPO_PATH.
 
 4. Test by creating a Linear issue in "$PROJECT_NAME" and moving it to Todo (AI).
+   Watch the trace ID propagate through: \`wrangler tail\`, the resulting
+   \`gh run view --log\`, and the plan comment that appears in Linear.
 EOF

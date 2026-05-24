@@ -17,7 +17,12 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    env:
+      PR: ${{ github.event.pull_request.number }}
     steps:
+      - name: Trace
+        run: echo "🔗 pr=#${PR} title='${{ github.event.pull_request.title }}'"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -28,7 +33,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "claude,github-actions"
           prompt: |
-            Review pull request #${{ github.event.pull_request.number }} ("${{ github.event.pull_request.title }}").
+            Review pull request #${{ env.PR }} ("${{ github.event.pull_request.title }}").
 
             Focus on:
             - Correctness bugs and logic errors
@@ -44,3 +49,19 @@ jobs:
           claude_args: |
             --permission-mode bypassPermissions
             --allowedTools mcp__github__* Bash Read Grep Glob
+
+      - name: Verify outcome
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "claude[bot]")] | length')
+          echo "claude[bot] reviews on PR #$PR: $REVIEWS"
+          if [ "$REVIEWS" -gt 0 ]; then
+            echo "✓ verification passed"
+            exit 0
+          fi
+          echo "::error::Verification failed — claude[bot] did not post a review on PR #$PR"
+          exit 1
