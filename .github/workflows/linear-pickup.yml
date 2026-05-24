@@ -52,11 +52,11 @@ jobs:
             1. Fetch the issue with mcp__linear__get_issue.
             2. Read this repo's CLAUDE.md and any relevant code to understand context. Don't write code in this step.
             3. Write a clear, actionable plan. Plan should have: Context, Approach, Files to change, Verification.
-            4. Post the plan as a top-level comment on the issue via mcp__linear__save_comment. The comment body MUST start with this exact line, on its own:
+            4. Post the plan as a top-level comment on the issue via mcp__linear__save_comment. The comment body MUST start with this exact line (it's both the visible header and the marker the Worker greps for):
 
-               <!-- ssot:plan -->
+               ### 📋 Plan • react 👍 to approve
 
-               Then a `## Plan` header, then the plan content.
+               Then a blank line, then the plan content (Context, Approach, Files to change, Verification).
             5. Set the issue state to "Plan Review" via mcp__linear__save_issue.
 
             Do not open PRs, do not commit code, do not @-mention. Just plan and comment.

@@ -11,5 +11,5 @@ compatibility_date = "2026-05-01"
 
 [vars]
 TODO_AI_STATE_NAME = "Todo (AI)"
-PLAN_COMMENT_MARKER = "<!-- ssot:plan -->"
+PLAN_COMMENT_MARKER = "### 📋 Plan"
 APPROVAL_EMOJI = "+1"

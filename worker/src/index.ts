@@ -113,7 +113,7 @@ async function handleReactionCreate(event: LinearEvent, env: Env): Promise<void>
     return;
   }
 
-  const marker = env.PLAN_COMMENT_MARKER || "<!-- ssot:plan -->";
+  const marker = env.PLAN_COMMENT_MARKER || "### 📋 Plan";
   if (!comment.body.startsWith(marker)) {
     console.log(`Reaction on non-plan comment ${reaction.commentId}, skipping`);
     return;
