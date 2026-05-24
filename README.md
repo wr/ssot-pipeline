@@ -29,19 +29,20 @@ Per-repo, setup is one command:
 ./bin/init-target-repo.sh <repo-path> <linear-project-id>
 ```
 
-Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` exported (or you'll be prompted).
+Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` exported (or you'll be prompted). Both repos (the target and this one) must be on their default branch with clean working trees in sync with origin — the script aborts otherwise rather than risk clobbering local work.
 
-The script:
-1. Copies `templates/ssot.yml` into `<repo>/.github/workflows/ssot.yml` — wires up all three reusable workflows (`linear-pickup`, `linear-implement`, `pr-review`)
-2. Sets the two repo secrets (`CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`)
-3. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
+The script does everything end-to-end:
+1. Installs `templates/ssot.yml` → `<repo>/.github/workflows/ssot.yml` (wires up `linear-pickup`, `linear-implement`, `pr-review`)
+2. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
+3. Sets repo secrets `CLAUDE_CODE_OAUTH_TOKEN` and `LINEAR_APP_TOKEN`
+4. Commits + pushes the target repo's stub + CLAUDE.md changes
+5. `jq`-edits this repo's `config/pipeline.json` to add the `project_to_repo` mapping, commits, and pushes to `main` — the `deploy-worker` Action then redeploys the Worker automatically
 
-Then it prints three manual follow-ups:
-1. Add `"<linear-project-id>": "<owner>/<repo>"` to `config/pipeline.json` → `project_to_repo`, commit, merge to main. The `deploy-worker` Action picks it up automatically.
-2. Confirm the workspace-level Linear webhook covers the new project's events (default = all projects in the workspace, so usually nothing to do).
-3. Commit and push the new `ssot.yml` and `CLAUDE.md` changes in the target repo.
+Re-runs are idempotent: each step skips itself if its effect is already in place.
 
 To test: create a Linear issue in the new project and move it to `Todo (AI)`. Watch the trace ID propagate through `wrangler tail`, `gh run view --log` on the target repo, and the plan comment that appears in Linear.
+
+(One thing the script doesn't touch: the workspace-level Linear webhook scope. Default = all projects in the workspace, so usually nothing to do; only matters if you've explicitly narrowed the webhook.)
 
 ## How a single issue flows through the loop
 
