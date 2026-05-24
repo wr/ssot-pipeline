@@ -58,7 +58,7 @@ jobs:
 
             Steps:
             1. Fetch the issue (mcp__linear__get_issue) and its comments (mcp__linear__list_comments).
-            2. Find the approved plan: the comment whose body starts with `<!-- ssot:plan -->`. Read it carefully.
+            2. Find the approved plan: the comment whose body starts with `### 📋 Plan`. Read it carefully.
             3. Implement per the plan. Use Edit/Write/Bash freely.
             4. Create a branch named `wells/<issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. wells/w-65-add-hello-script). Branch from main.
             5. Commit your changes. Commit message should focus on *why*. Include `Refs: ${{ github.event.client_payload.issue_id }}` as a trailer.
