@@ -17,16 +17,28 @@ This is a one-time setup. Once done, every target repo wired with `init-target-r
 
 ## 2. Get an actor=app token
 
-Linear's `actor=app` mode means actions are attributed to the application, not your user. Here's the manual OAuth dance:
+Linear's `actor=app` mode means actions are attributed to the application, not your user.
+
+**Recommended:** use the helper script — it handles the OAuth dance for you.
+
+```bash
+./bin/get-linear-token
+# Prompts for Client ID + Secret, opens browser, captures callback, prints token.
+```
+
+It also verifies the token works and confirms the `viewer.name` is `claude` (proving `actor=app` is honored).
+
+> Note: Linear's app tokens don't expire by default. If you ever regenerate it, you have to redo this dance.
+
+<details>
+<summary>Manual curl version (skip if you used the helper)</summary>
 
 ```bash
 # Step 1: open this URL in your browser (replace CLIENT_ID)
 open "https://linear.app/oauth/authorize?client_id=CLIENT_ID&redirect_uri=http://localhost:8787/oauth/callback&response_type=code&scope=read,write,issues:create,comments:create,app:assignable,app:mentionable&actor=app"
 
 # Step 2: approve, copy the `code` from the redirect URL.
-# It'll redirect to: http://localhost:8787/oauth/callback?code=XYZ...
-
-# Step 3: exchange code for token (replace placeholders)
+# Step 3: exchange code for token
 curl -X POST https://api.linear.app/oauth/token \
   -d "grant_type=authorization_code" \
   -d "code=THE_CODE_FROM_STEP_2" \
@@ -34,10 +46,7 @@ curl -X POST https://api.linear.app/oauth/token \
   -d "client_id=YOUR_CLIENT_ID" \
   -d "client_secret=YOUR_CLIENT_SECRET"
 ```
-
-The response includes `access_token` — that's your `LINEAR_APP_TOKEN`. Save it (e.g., 1Password).
-
-> Note: Linear's app tokens don't expire by default. If you ever regenerate it, you have to redo this dance.
+</details>
 
 ## 3. Verify the token works
 
