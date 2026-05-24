@@ -19,6 +19,7 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+      actions: write   # allow GITHUB_TOKEN to push changes to .github/workflows/*
     env:
       CONFIG_URL: https://ssot-pipeline.wells-riley.workers.dev/config
       TRACE: ${{ github.event.client_payload.trace_id }}
