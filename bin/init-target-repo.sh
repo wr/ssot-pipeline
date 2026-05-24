@@ -7,13 +7,13 @@
 # What it does:
 #   1. Copies templates/ssot.yml into <repo>/.github/workflows/ssot.yml
 #   2. Adds a `## Source of truth` block to <repo>/CLAUDE.md (creates it if missing)
-#   3. Sets repo secrets ANTHROPIC_API_KEY + LINEAR_APP_TOKEN (reads from env or prompts)
+#   3. Sets repo secrets CLAUDE_CODE_OAUTH_TOKEN + LINEAR_APP_TOKEN (reads from env or prompts)
 #   4. Prints the mapping line to add to the Worker's LINEAR_PROJECT_TO_REPO
 #
 # Prerequisites:
 #   - gh CLI authenticated
 #   - jq installed
-#   - ANTHROPIC_API_KEY and LINEAR_APP_TOKEN exported (or you'll be prompted)
+#   - CLAUDE_CODE_OAUTH_TOKEN (from `/install-github-app`) and LINEAR_APP_TOKEN exported (or you'll be prompted)
 
 set -euo pipefail
 
@@ -92,9 +92,13 @@ else
   echo "→ CLAUDE.md already has Source of truth block (leaving as-is — edit by hand if needed)"
 fi
 
-# --- Set repo secrets ---
+# --- Set repo secrets (skip if already set; idempotent) ---
 set_secret() {
   local name="$1"
+  if gh secret list --repo "$REPO_FULL" --json name --jq '.[].name' 2>/dev/null | grep -qx "$name"; then
+    echo "→ Secret $name already set on $REPO_FULL (skipping — delete first to rotate)"
+    return
+  fi
   local value="${!name:-}"
   if [ -z "$value" ]; then
     echo -n "$name: "
@@ -109,7 +113,7 @@ set_secret() {
   echo "→ Set secret $name on $REPO_FULL"
 }
 
-set_secret ANTHROPIC_API_KEY
+set_secret CLAUDE_CODE_OAUTH_TOKEN
 set_secret LINEAR_APP_TOKEN
 
 # --- Print Worker update instructions ---
