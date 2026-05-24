@@ -12,7 +12,7 @@ See `README.md` for the user-facing intro and setup. See `docs/architecture.md` 
 
 ## Working in this repo
 
-- All four workflows in `.github/workflows/` are **reusable** (`workflow_call`). Don't add `on:` triggers that fire them in this repo unless they're for dogfooding the loop here. Target repos call them.
+- All three reusable workflows in `.github/workflows/` use `workflow_call`. Don't add `on:` triggers that fire them in this repo unless they're for dogfooding the loop here. Target repos call them.
 - The Worker (`worker/`) is a pure router — no state, no DB. State always lives in Linear and GitHub.
 - When changing the contract between Worker and workflows (event shape, client_payload), update both sides in the same PR and bump the version in `templates/ssot.yml` so target repos know to re-run `init-target-repo.sh`.
 - Don't commit secrets. The Worker reads them via `wrangler secret`; workflows read them via `${{ secrets.* }}`.

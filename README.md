@@ -6,7 +6,7 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 
 ## What's in the box
 
-- **`.github/workflows/`** — four reusable workflows (`linear-pickup`, `linear-implement`, `pr-review`, `pr-merge`). Target repos consume them via `uses:`.
+- **`.github/workflows/`** — three reusable workflows (`linear-pickup`, `linear-implement`, `pr-review`). Target repos consume them via `uses:`. Auto-close on PR merge is handled by Linear's native GitHub integration (PR body uses `Closes W-XX`).
 - **`worker/`** — Cloudflare Worker that receives Linear webhooks and fires GitHub `repository_dispatch` events into the right target repo.
 - **`templates/ssot.yml`** — the ~20-line stub a target repo drops in to wire itself up.
 - **`bin/init-target-repo.sh`** — one-command setup for a new target repo.
@@ -23,9 +23,9 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 ## How a single issue flows through the loop
 
 ```
-Todo (AI) ──webhook──▶ Plan Review ──👍 reaction──▶ In Progress ──implement──▶ In Review ──approve──▶ Done
-                       (claude posts                  (claude branches,           (claude-code-action
-                        plan comment)                  commits, opens PR)          auto-reviews the PR)
+Todo (AI) ──webhook──▶ Plan Review ──👍 reaction──▶ In Progress ──implement──▶ In Review ──merge──▶ Done
+                       (claude posts                  (claude branches,           (Linear native integration
+                        plan comment)                  commits, opens PR)          closes via `Closes W-XX`)
 ```
 
 Each step is a fresh headless `claude -p` invocation. No session resume, no in-process pause. If a webhook is re-fired, the workflows are idempotent.
