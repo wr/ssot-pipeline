@@ -99,6 +99,12 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # claude-code-action mints its own GitHub App installation token via OIDC
+          # (separate from GITHUB_TOKEN). Default minted scopes don't include
+          # `workflows`, so pushes touching .github/workflows/* fail. Asking for it
+          # explicitly here is what lets the loop ship workflow-file changes.
+          additional_permissions: |
+            workflows: write
           prompt: |
             You're implementing Linear issue ${{ env.ISSUE }}, which has an approved plan.
 
