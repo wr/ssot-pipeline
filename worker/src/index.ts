@@ -133,6 +133,54 @@ async function handleReactionCreate(event: LinearEvent, env: Env): Promise<void>
   }
 
   await fireDispatch(repo, "linear-implement", { issue_id: issueId }, env);
+
+  // Post a 🤖 reaction so the user gets visible confirmation that the dispatch
+  // was accepted. Wrapped in try/catch so a reaction failure doesn't bubble up
+  // and cause the webhook handler to error after the dispatch already succeeded.
+  try {
+    await postReaction(reaction.commentId, "robot_face", env);
+  } catch (err) {
+    console.error("Failed to post robot_face reaction:", err);
+  }
+}
+
+async function postReaction(commentId: string, emoji: string, env: Env): Promise<void> {
+  const mutation = `
+    mutation($commentId: String!, $emoji: String!) {
+      reactionCreate(input: { commentId: $commentId, emoji: $emoji }) {
+        success
+      }
+    }`;
+
+  const resp = await fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query: mutation, variables: { commentId, emoji } }),
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) {
+    console.error(`Linear reactionCreate failed: ${resp.status} ${text}`);
+    return;
+  }
+
+  let data: { data?: { reactionCreate?: { success?: boolean } }; errors?: unknown };
+  try {
+    data = JSON.parse(text);
+  } catch {
+    console.error(`Linear reactionCreate response not JSON: ${text}`);
+    return;
+  }
+
+  if (data.errors) {
+    console.error("Linear reactionCreate errors:", JSON.stringify(data.errors));
+    return;
+  }
+
+  console.log(`Posted ${emoji} reaction to comment ${commentId}: success=${data.data?.reactionCreate?.success}`);
 }
 
 async function fetchComment(commentId: string, env: Env): Promise<LinearComment | null> {
