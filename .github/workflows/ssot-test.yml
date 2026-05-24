@@ -1,0 +1,13 @@
+name: ssot-test
+
+on:
+  repository_dispatch:
+    types: [test-inline]
+
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "issue_id: ${{ github.event.client_payload.issue_id }}"
+          echo "It works."
