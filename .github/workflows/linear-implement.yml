@@ -47,9 +47,34 @@ jobs:
             echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker')"
             echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
             echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
+            echo "in_progress_state=$(echo "$CONFIG" | jq -r '.in_progress_state')"
             echo "in_review_state=$(echo "$CONFIG" | jq -r '.in_review_state')"
             echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Flip to In Progress (visible feedback)
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          IN_PROGRESS_STATE: ${{ steps.cfg.outputs.in_progress_state }}
+        run: |
+          set -euo pipefail
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
+
+          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+          IN_PROGRESS_UUID=$(echo "$RESP" | jq -r --arg n "$IN_PROGRESS_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          if [ -z "$IN_PROGRESS_UUID" ] || [ "$IN_PROGRESS_UUID" = "null" ]; then
+            echo "::warning::In Progress state '$IN_PROGRESS_STATE' not found in team — skipping early flip"
+            exit 0
+          fi
+
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$IN_PROGRESS_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+          echo "trace=${TRACE} flipped $ISSUE to $IN_PROGRESS_STATE"
 
       - name: Write MCP config
         env:
