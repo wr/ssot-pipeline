@@ -14,6 +14,7 @@ permissions:
   pull-requests: write
   issues: write
   id-token: write
+  actions: write   # required: linear-implement.yml asks for this to push .github/workflows/* changes
 
 jobs:
   linear-pickup:
