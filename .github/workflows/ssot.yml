@@ -4,6 +4,12 @@ on:
   repository_dispatch:
     types: [linear-pickup]
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
 jobs:
   linear-pickup:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'linear-pickup'
