@@ -42,7 +42,44 @@ jobs:
             echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Skip if plan already posted
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          PLAN_MARKER: ${{ steps.cfg.outputs.plan_marker }}
+        run: |
+          set -euo pipefail
+          # Belt-and-braces: if a prior pickup run already posted a plan for
+          # this issue, exit early. The Worker should dedupe upstream (W-88),
+          # but this protects against any regression there.
+          GQL_URL=https://api.linear.app/graphql
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id comments{nodes{id body}}}}",variables:{id:$id}}')
+          RESP=$(curl -sS -X POST "$GQL_URL" \
+            -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$QUERY")
+
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+          MARKER_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
+
+          echo "trace=${TRACE} idempotency check: plan_comments=$MARKER_COUNT"
+
+          if [ "$MARKER_COUNT" -gt 0 ]; then
+            echo "::notice::Plan already posted for $ISSUE — skipping duplicate dispatch (trace=${TRACE})"
+            echo "## Duplicate dispatch skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "Issue $ISSUE already has $MARKER_COUNT plan comment(s). Exiting without invoking Claude." >> "$GITHUB_STEP_SUMMARY"
+
+            BODY="🛑 **Duplicate pickup dispatch skipped** — _(trace: ${TRACE})_\n\nA plan comment already exists for this issue. The Worker should dedupe upstream — if you see this, investigate.\n\n[Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+            curl -sS -X POST "$GQL_URL" \
+              -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+
+            # Signal downstream steps to skip
+            echo "ALREADY_PLANNED=1" >> "$GITHUB_ENV"
+          fi
+
       - name: Write MCP config
+        if: env.ALREADY_PLANNED != '1'
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           MCP_URL: ${{ steps.cfg.outputs.mcp_url }}
@@ -63,6 +100,7 @@ jobs:
           EOF
 
       - uses: anthropics/claude-code-action@v1
+        if: env.ALREADY_PLANNED != '1'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
@@ -103,6 +141,13 @@ jobs:
           # Skip verification if the prior step didn't even run (no config etc.)
           if [ -z "${EXPECT_STATE:-}" ]; then
             echo "::warning::No config available, skipping verification"
+            exit 0
+          fi
+
+          # Skip verification if we deliberately short-circuited (plan already
+          # existed for this issue — see the "Skip if plan already posted" step).
+          if [ "${ALREADY_PLANNED:-}" = "1" ]; then
+            echo "✓ verification skipped — duplicate dispatch was deliberately short-circuited"
             exit 0
           fi
 
