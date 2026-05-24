@@ -17,19 +17,21 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 
 1. Create the `claude` Linear OAuth app — see [`docs/linear-app-setup.md`](./docs/linear-app-setup.md)
 2. Install the `claude[bot]` GitHub App — see [`docs/github-app-setup.md`](./docs/github-app-setup.md)
-3. Deploy the Worker — `cd worker && wrangler deploy`
+3. First-time Worker deploy — `cd worker && npx wrangler deploy`. After that, the `deploy-worker` GitHub Action redeploys automatically on every merge that touches `config/pipeline.json` or `worker/**` (needs repo secret `CLOUDFLARE_API_TOKEN`).
 4. Register the Linear webhook → your Worker URL
 5. Run `./bin/init-target-repo.sh <repo-path> <linear-project-id>` for each project you want to wire up
 
 ## How a single issue flows through the loop
 
 ```
-Todo (AI) ──webhook──▶ Plan Review ──👍 reaction──▶ In Progress ──implement──▶ In Review ──merge──▶ Done
-                       (claude posts                  (claude branches,           (Linear native integration
-                        plan comment)                  commits, opens PR)          closes via `Closes W-XX`)
+Todo (AI) ──webhook──▶ Planning ──plan posted──▶ Plan Review ──👍──▶ In Progress ──PR opens──▶ In Review ──merge──▶ Done
+                       (early flip,              (claude posts        (early flip,             (Linear native
+                        visible feedback)         plan comment)        then implements)         closes via Closes W-XX)
 ```
 
 Each step is a fresh headless `claude -p` invocation. No session resume, no in-process pause. If a webhook is re-fired, the workflows are idempotent.
+
+The `Planning` and `In Progress` flips happen at the very start of `linear-pickup` / `linear-implement` (before invoking Claude) so you see visible motion within seconds of moving an issue to `Todo (AI)` or 👍-ing a plan.
 
 ## Trace IDs
 
@@ -54,4 +56,5 @@ Requires a `Stuck` workflow state (type: Started) in your team. Create it in Lin
 - **Workflow logs:** `gh run view <run-id> --log` — Claude's transcript is in the stream-json output
 - **Linear webhook deliveries:** Linear → Settings → API → Webhooks → click your webhook → Deliveries tab
 - **Stuck issue:** read the diagnostic comment for the trace ID + reason. After fixing, move the issue back to `Todo (AI)`.
-- **Changing a magic string:** edit `config/pipeline.json`, commit, `cd worker && npx wrangler deploy`. Next workflow run picks it up.
+- **Changing a magic string:** edit `config/pipeline.json`, commit, merge to main. The `deploy-worker` Action redeploys the Worker on merge, and the next workflow run picks up the new value from `GET /config`. For ad-hoc redeploys: `cd worker && npx wrangler deploy` (or use the manual run button on the deploy-worker workflow).
+- **Editing reusable workflows from the loop itself:** `claude-code-action` mints its own GitHub App installation token via OIDC; that token needs `workflows: write` scope to push changes under `.github/workflows/*`. `linear-implement.yml` already passes `additional_permissions: workflows: write` to the action — if you fork or copy this setup, keep that input.
