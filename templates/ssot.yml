@@ -18,6 +18,16 @@ on:
   pull_request:
     types: [opened, synchronize]
 
+# GITHUB_TOKEN permissions. Reusable workflows can only request <= what the
+# caller grants — keep this block aligned with the union of needs across all
+# linear-* and pr-review reusables. Missing a scope here = startup_failure.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: write   # required: linear-implement.yml pushes .github/workflows/* changes
+
 jobs:
   linear-pickup:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'linear-pickup'
