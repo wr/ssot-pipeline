@@ -3,7 +3,7 @@ name: linear-implement (reusable)
 on:
   workflow_call:
     secrets:
-      ANTHROPIC_API_KEY:
+      CLAUDE_CODE_OAUTH_TOKEN:
         required: true
       LINEAR_APP_TOKEN:
         required: true
@@ -50,7 +50,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             You're implementing Linear issue ${{ github.event.client_payload.issue_id }}, which has an approved plan.
 

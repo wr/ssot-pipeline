@@ -7,15 +7,20 @@ Two pieces of auth needed:
 
 ## 1. Anthropic auth (one secret per target repo)
 
-```bash
-# Set as a repo secret on each target repo:
-gh secret set ANTHROPIC_API_KEY --repo wr/<target-repo>
-# Paste your API key from https://console.anthropic.com/settings/keys
+**Recommended: Claude Max via `/install-github-app`** — uses your Max subscription, no per-token billing. From any Claude Code session in the target repo, type:
+
+```
+/install-github-app
 ```
 
-`init-target-repo.sh` does this for you if `ANTHROPIC_API_KEY` is exported in your shell.
+Walks you through installing Anthropic's GitHub App and sets `CLAUDE_CODE_OAUTH_TOKEN` as a repo secret automatically. Trade-off: Max session/rate limits apply to autonomous runs.
 
-Alternative: install Anthropic's GitHub App via `claude /install-github-app` for OAuth-based auth using your Claude Max subscription instead of API credits. This is a separate App from the one in section 3 below — Anthropic's App only handles Anthropic auth; it doesn't change which user appears as the commit author.
+**Alternative: API key** — no rate limits, but metered cost. Swap `claude_code_oauth_token` → `anthropic_api_key` in the workflows and set:
+```bash
+gh secret set ANTHROPIC_API_KEY --repo wr/<target-repo>
+```
+
+Note: Anthropic's GitHub App is separate from the custom `claude` App in section 3 below. Anthropic's App only handles Anthropic auth; it doesn't change which user appears as the commit author.
 
 ## 2. Worker → GitHub auth (v0: fine-grained PAT)
 
