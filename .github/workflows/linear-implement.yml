@@ -65,7 +65,7 @@ jobs:
             6. Push the branch.
             7. Open a ready (non-draft) PR with `gh pr create`:
                - Title = issue title
-               - Body: brief summary, test plan checklist, and `Refs ${{ github.event.client_payload.issue_id }}` on its own line
+               - Body: brief summary, test plan checklist, and `Closes ${{ github.event.client_payload.issue_id }}` on its own line (this triggers Linear's native auto-close on merge)
             8. Attach the PR URL to the Linear issue (mcp__linear__create_attachment with the PR URL as url and the PR title as title).
             9. Set Linear issue state to "In Review" (mcp__linear__save_issue).
             10. Post a brief Linear comment: "Ready for review: <PR-url>".
