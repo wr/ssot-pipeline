@@ -21,6 +21,28 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 4. Register the Linear webhook → your Worker URL
 5. Run `./bin/init-target-repo.sh <repo-path> <linear-project-id>` for each project you want to wire up
 
+## Adding a new target repo
+
+Per-repo, setup is one command:
+
+```
+./bin/init-target-repo.sh <repo-path> <linear-project-id>
+```
+
+Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` exported (or you'll be prompted).
+
+The script:
+1. Copies `templates/ssot.yml` into `<repo>/.github/workflows/ssot.yml` — wires up all three reusable workflows (`linear-pickup`, `linear-implement`, `pr-review`)
+2. Sets the two repo secrets (`CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`)
+3. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
+
+Then it prints three manual follow-ups:
+1. Add `"<linear-project-id>": "<owner>/<repo>"` to `config/pipeline.json` → `project_to_repo`, commit, merge to main. The `deploy-worker` Action picks it up automatically.
+2. Confirm the workspace-level Linear webhook covers the new project's events (default = all projects in the workspace, so usually nothing to do).
+3. Commit and push the new `ssot.yml` and `CLAUDE.md` changes in the target repo.
+
+To test: create a Linear issue in the new project and move it to `Todo (AI)`. Watch the trace ID propagate through `wrangler tail`, `gh run view --log` on the target repo, and the plan comment that appears in Linear.
+
 ## How a single issue flows through the loop
 
 ```
