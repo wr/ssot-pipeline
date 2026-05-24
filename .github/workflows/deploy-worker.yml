@@ -1,0 +1,37 @@
+name: deploy-worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - config/pipeline.json
+      - worker/**
+      - .github/workflows/deploy-worker.yml
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    concurrency:
+      group: deploy-worker
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker deps
+        working-directory: worker
+        run: npm ci
+
+      - name: Deploy
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy
