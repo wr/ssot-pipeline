@@ -36,7 +36,7 @@ jobs:
             exit 0
           }
 
-          gh pr merge "$PR" --squash --delete-branch --auto
+          gh pr merge "$PR" --squash --delete-branch
 
       - name: Extract Linear issue from PR body
         id: linear
