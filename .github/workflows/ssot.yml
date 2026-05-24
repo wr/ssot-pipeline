@@ -14,8 +14,9 @@ permissions:
   pull-requests: write
   issues: write
   id-token: write
-  actions: write   # required: linear-implement.yml asks for this to push .github/workflows/* changes
-
+  actions: write
+  workflows: write
+  
 jobs:
   linear-pickup:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'linear-pickup'
