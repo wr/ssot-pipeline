@@ -56,6 +56,8 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
       await handleIssueUpdate(event, env, trace);
     } else if (event.type === "Reaction" && event.action === "create") {
       await handleReactionCreate(event, env, trace);
+    } else if (event.type === "Comment" && event.action === "create") {
+      await handleCommentCreate(event, env, trace);
     } else {
       console.log(`trace=${trace} ignored: ${event.type}.${event.action}`);
     }
@@ -164,6 +166,47 @@ async function handleReactionCreate(event: LinearEvent, env: Env, trace: string)
   } catch (err) {
     console.error(`trace=${trace} failed to post ack reaction:`, err);
   }
+}
+
+async function handleCommentCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
+  const comment = event.data as LinearComment;
+
+  if (!comment.userId || !config.approved_user_ids.includes(comment.userId)) {
+    console.log(`trace=${trace} ignored: Comment.create (userId=${comment.userId ?? "unknown"} not in approved list)`);
+    return;
+  }
+
+  if (!comment.parentId) {
+    console.log(`trace=${trace} ignored: Comment.create (top-level, no parentId)`);
+    return;
+  }
+
+  const parent = await fetchComment(comment.parentId, env);
+  if (!parent) {
+    console.log(`trace=${trace} Comment.create: could not fetch parent comment ${comment.parentId}`);
+    return;
+  }
+
+  if (!parent.body.startsWith(config.plan_marker)) {
+    console.log(`trace=${trace} ignored: Comment.create (reply to non-plan comment ${comment.parentId})`);
+    return;
+  }
+
+  const issueId = parent.issue?.identifier;
+  const projectId = parent.issue?.project?.id;
+  if (!issueId || !projectId) {
+    console.log(`trace=${trace} Comment.create: parent comment ${comment.parentId} missing issue/project context`);
+    return;
+  }
+
+  const repo = lookupRepo(projectId);
+  if (!repo) {
+    console.log(`trace=${trace} Comment.create: no repo mapping for project ${projectId}`);
+    return;
+  }
+
+  console.log(`trace=${trace} issue ${issueId}: firing linear-replan (comment=${comment.id})`);
+  await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: comment.id, trace_id: trace }, env, trace);
 }
 
 async function postReaction(commentId: string, emoji: string, env: Env, trace: string): Promise<void> {
@@ -319,6 +362,8 @@ type LinearReaction = {
 type LinearComment = {
   id: string;
   body: string;
+  parentId?: string;
+  userId?: string;
   issue?: {
     identifier?: string;
     project?: { id?: string };

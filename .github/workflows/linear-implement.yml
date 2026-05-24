@@ -112,7 +112,7 @@ jobs:
 
             Steps:
             1. Fetch the issue (mcp__linear__get_issue) and its comments (mcp__linear__list_comments).
-            2. Find the approved plan: the comment whose body starts with `${{ steps.cfg.outputs.plan_marker }}`. Read it carefully.
+            2. Find the approved plan: the comment whose body starts with `${{ steps.cfg.outputs.plan_marker }}`. If multiple plan comments exist, use the latest one (highest `createdAt`). Read it carefully.
             3. Implement per the plan. Use Edit/Write/Bash freely.
             4. Create a branch named `wells/<issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. wells/w-65-add-hello-script). Branch from main.
             5. Commit your changes. Commit message should focus on *why*. Include `Refs: ${{ env.ISSUE }}` as a trailer.
