@@ -17,19 +17,43 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 
 1. Create the `claude` Linear OAuth app — see [`docs/linear-app-setup.md`](./docs/linear-app-setup.md)
 2. Install the `claude[bot]` GitHub App — see [`docs/github-app-setup.md`](./docs/github-app-setup.md)
-3. Deploy the Worker — `cd worker && wrangler deploy`
+3. First-time Worker deploy — `cd worker && npx wrangler deploy`. After that, the `deploy-worker` GitHub Action redeploys automatically on every merge that touches `config/pipeline.json` or `worker/**` (needs repo secret `CLOUDFLARE_API_TOKEN`).
 4. Register the Linear webhook → your Worker URL
 5. Run `./bin/init-target-repo.sh <repo-path> <linear-project-id>` for each project you want to wire up
+
+## Adding a new target repo
+
+Per-repo, setup is one command:
+
+```
+./bin/init-target-repo.sh <repo-path> <linear-project-id>
+```
+
+Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` exported (or you'll be prompted).
+
+The script:
+1. Copies `templates/ssot.yml` into `<repo>/.github/workflows/ssot.yml` — wires up all three reusable workflows (`linear-pickup`, `linear-implement`, `pr-review`)
+2. Sets the two repo secrets (`CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`)
+3. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
+
+Then it prints three manual follow-ups:
+1. Add `"<linear-project-id>": "<owner>/<repo>"` to `config/pipeline.json` → `project_to_repo`, commit, merge to main. The `deploy-worker` Action picks it up automatically.
+2. Confirm the workspace-level Linear webhook covers the new project's events (default = all projects in the workspace, so usually nothing to do).
+3. Commit and push the new `ssot.yml` and `CLAUDE.md` changes in the target repo.
+
+To test: create a Linear issue in the new project and move it to `Todo (AI)`. Watch the trace ID propagate through `wrangler tail`, `gh run view --log` on the target repo, and the plan comment that appears in Linear.
 
 ## How a single issue flows through the loop
 
 ```
-Todo (AI) ──webhook──▶ Plan Review ──👍 reaction──▶ In Progress ──implement──▶ In Review ──merge──▶ Done
-                       (claude posts                  (claude branches,           (Linear native integration
-                        plan comment)                  commits, opens PR)          closes via `Closes W-XX`)
+Todo (AI) ──webhook──▶ Planning ──plan posted──▶ Plan Review ──👍──▶ In Progress ──PR opens──▶ In Review ──merge──▶ Done
+                       (early flip,              (claude posts        (early flip,             (Linear native
+                        visible feedback)         plan comment)        then implements)         closes via Closes W-XX)
 ```
 
 Each step is a fresh headless `claude -p` invocation. No session resume, no in-process pause. If a webhook is re-fired, the workflows are idempotent.
+
+The `Planning` and `In Progress` flips happen at the very start of `linear-pickup` / `linear-implement` (before invoking Claude) so you see visible motion within seconds of moving an issue to `Todo (AI)` or 👍-ing a plan.
 
 ## Trace IDs
 
@@ -54,4 +78,5 @@ Requires a `Stuck` workflow state (type: Started) in your team. Create it in Lin
 - **Workflow logs:** `gh run view <run-id> --log` — Claude's transcript is in the stream-json output
 - **Linear webhook deliveries:** Linear → Settings → API → Webhooks → click your webhook → Deliveries tab
 - **Stuck issue:** read the diagnostic comment for the trace ID + reason. After fixing, move the issue back to `Todo (AI)`.
-- **Changing a magic string:** edit `config/pipeline.json`, commit, `cd worker && npx wrangler deploy`. Next workflow run picks it up.
+- **Changing a magic string:** edit `config/pipeline.json`, commit, merge to main. The `deploy-worker` Action redeploys the Worker on merge, and the next workflow run picks up the new value from `GET /config`. For ad-hoc redeploys: `cd worker && npx wrangler deploy` (or use the manual run button on the deploy-worker workflow).
+- **Editing reusable workflows from the loop itself:** `claude-code-action` mints its own GitHub App installation token via OIDC; that token needs `workflows: write` scope to push changes under `.github/workflows/*`. `linear-implement.yml` already passes `additional_permissions: workflows: write` to the action — if you fork or copy this setup, keep that input.
