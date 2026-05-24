@@ -1,0 +1,15 @@
+{
+  "plan_marker": "### 📋 Plan • react 👍 to approve",
+  "linear_mcp_url": "https://mcp.linear.app/mcp",
+  "linear_mcp_transport": "http",
+  "todo_ai_state": "Todo (AI)",
+  "plan_review_state": "Plan Review",
+  "in_review_state": "In Review",
+  "stuck_state": "Stuck",
+  "approval_emoji": "+1",
+  "approval_ack_emoji": "robot_face",
+  "approved_user_ids": ["95cef275-b454-485c-bd8c-4cadb6b29a08"],
+  "project_to_repo": {
+    "f9eb7447-31fb-4e02-b46b-7d147f2d0f55": "wr/ssot-pipeline"
+  }
+}

@@ -19,7 +19,14 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    env:
+      CONFIG_URL: https://ssot-pipeline.wells-riley.workers.dev/config
+      TRACE: ${{ github.event.client_payload.trace_id }}
+      ISSUE: ${{ github.event.client_payload.issue_id }}
     steps:
+      - name: Trace
+        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE}"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -30,16 +37,31 @@ jobs:
           git config user.name "claude[bot]"
           git config user.email "claude[bot]@users.noreply.github.com"
 
+      - name: Fetch pipeline config
+        id: cfg
+        run: |
+          set -euo pipefail
+          CONFIG=$(curl -sS "$CONFIG_URL")
+          {
+            echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker')"
+            echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
+            echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
+            echo "in_review_state=$(echo "$CONFIG" | jq -r '.in_review_state')"
+            echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Write MCP config
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          MCP_URL: ${{ steps.cfg.outputs.mcp_url }}
+          MCP_TRANSPORT: ${{ steps.cfg.outputs.mcp_transport }}
         run: |
           cat > /tmp/mcp.json <<EOF
           {
             "mcpServers": {
               "linear": {
-                "type": "http",
-                "url": "https://mcp.linear.app/mcp",
+                "type": "${MCP_TRANSPORT}",
+                "url": "${MCP_URL}",
                 "headers": {
                   "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
                 }
@@ -52,26 +74,77 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            You're implementing Linear issue ${{ github.event.client_payload.issue_id }}, which has an approved plan.
+            You're implementing Linear issue ${{ env.ISSUE }}, which has an approved plan.
 
             Operating identity: @claude (Linear) + claude[bot] (GitHub). Don't @-mention.
 
             Steps:
             1. Fetch the issue (mcp__linear__get_issue) and its comments (mcp__linear__list_comments).
-            2. Find the approved plan: the comment whose body starts with `### 📋 Plan`. Read it carefully.
+            2. Find the approved plan: the comment whose body starts with `${{ steps.cfg.outputs.plan_marker }}`. Read it carefully.
             3. Implement per the plan. Use Edit/Write/Bash freely.
             4. Create a branch named `wells/<issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. wells/w-65-add-hello-script). Branch from main.
-            5. Commit your changes. Commit message should focus on *why*. Include `Refs: ${{ github.event.client_payload.issue_id }}` as a trailer.
+            5. Commit your changes. Commit message should focus on *why*. Include `Refs: ${{ env.ISSUE }}` as a trailer.
             6. Push the branch.
             7. Open a ready (non-draft) PR with `gh pr create`:
                - Title = issue title
-               - Body: brief summary, test plan checklist, and `Closes ${{ github.event.client_payload.issue_id }}` on its own line (this triggers Linear's native auto-close on merge)
+               - Body: brief summary, test plan checklist, `Closes ${{ env.ISSUE }}` on its own line, and a footer `_(trace: ${{ env.TRACE }})_`.
             8. Attach the PR URL to the Linear issue (mcp__linear__create_attachment with the PR URL as url and the PR title as title).
-            9. Set Linear issue state to "In Review" (mcp__linear__save_issue).
-            10. Post a brief Linear comment: "Ready for review: <PR-url>".
+            9. Set Linear issue state to "${{ steps.cfg.outputs.in_review_state }}" (mcp__linear__save_issue).
+            10. Post a brief Linear comment: "Ready for review: <PR-url>  _(trace: ${{ env.TRACE }})_".
 
-            If anything blocks you (plan unclear, tests fail, can't push): post a Linear comment describing the blocker, set state back to "In Progress", and stop. Don't open a broken PR.
+            If anything blocks you (plan unclear, tests fail, can't push): post a Linear comment describing the blocker (include the trace), set state back to "In Progress", and stop. Don't open a broken PR.
           claude_args: |
             --permission-mode bypassPermissions
             --mcp-config /tmp/mcp.json
             --allowedTools mcp__linear__* mcp__github__* Bash Read Write Edit Grep Glob
+
+      - name: Verify outcome
+        if: always()
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          EXPECT_STATE: ${{ steps.cfg.outputs.in_review_state }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EXPECT_STATE:-}" ]; then
+            echo "::warning::No config available, skipping verification"
+            exit 0
+          fi
+
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
+
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} attachments{nodes{url}}}}",variables:{id:$id}}')
+          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
+
+          STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+          PR_COUNT=$(echo "$RESP" | jq '[.data.issue.attachments.nodes[] | select(.url | contains("github.com") and contains("/pull/"))] | length')
+
+          echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE pr_attachments=$PR_COUNT"
+
+          if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PR_COUNT" -gt 0 ]; then
+            echo "✓ verification passed"
+            exit 0
+          fi
+
+          echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), pr_attachments=$PR_COUNT"
+
+          STATES=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg uuid "$ISSUE_UUID" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$uuid}}')")
+          STUCK_UUID=$(echo "$STATES" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          BODY="❌ **Implement failed verification** — _(trace: ${TRACE})_\n\nClaude finished without leaving the issue in the expected state with a PR attached.\n\n- Expected state: \`${EXPECT_STATE}\`\n- Actual state: \`${STATE}\`\n- PR attachments found: ${PR_COUNT}\n\n[Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+
+          if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
+            curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+            echo "Moved to Stuck state"
+          else
+            echo "::warning::Stuck state '$STUCK_STATE' does not exist in this team — skipping state change."
+          fi
+
+          exit 1

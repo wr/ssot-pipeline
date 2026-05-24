@@ -14,8 +14,11 @@ See `README.md` for the user-facing intro and setup. See `docs/architecture.md` 
 
 - All three reusable workflows in `.github/workflows/` use `workflow_call`. Don't add `on:` triggers that fire them in this repo unless they're for dogfooding the loop here. Target repos call them.
 - The Worker (`worker/`) is a pure router — no state, no DB. State always lives in Linear and GitHub.
+- **Magic strings live in `config/pipeline.json`** — plan marker, MCP URL, state names, approval rules, project→repo routing. The Worker imports it at build time and serves it at `GET /config`; workflows curl that endpoint and inject values into prompts. Don't duplicate config values into workflow YAML or Worker code — read from here.
+- **Trace IDs are mandatory** — every Worker-initiated webhook gets an 8-char trace ID. Propagate it through `client_payload.trace_id`, echo in workflows, embed in Linear comments. Makes cross-system debugging tractable.
+- **Every workflow ends with a verification step** — assert the expected outcome happened (state transition, comment posted, PR opened). If not, post a diagnostic Linear comment and flip the issue to `Stuck`. No silent successes.
 - When changing the contract between Worker and workflows (event shape, client_payload), update both sides in the same PR and bump the version in `templates/ssot.yml` so target repos know to re-run `init-target-repo.sh`.
-- Don't commit secrets. The Worker reads them via `wrangler secret`; workflows read them via `${{ secrets.* }}`.
+- Don't commit secrets. Only true secrets (Linear webhook signing secret, Linear app token, GitHub dispatch PAT) are `wrangler secret put`s. Non-secret identifiers like user IDs and project→repo mappings live in `config/pipeline.json`.
 
 ## Identities
 - `@claude` in Linear = the Linear OAuth app (actor=app). Token = `LINEAR_APP_TOKEN`.

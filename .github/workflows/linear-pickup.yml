@@ -17,21 +17,43 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      CONFIG_URL: https://ssot-pipeline.wells-riley.workers.dev/config
+      TRACE: ${{ github.event.client_payload.trace_id }}
+      ISSUE: ${{ github.event.client_payload.issue_id }}
     steps:
+      - name: Trace
+        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE}"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Fetch pipeline config
+        id: cfg
+        run: |
+          set -euo pipefail
+          CONFIG=$(curl -sS "$CONFIG_URL")
+          {
+            echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker')"
+            echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
+            echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
+            echo "plan_review_state=$(echo "$CONFIG" | jq -r '.plan_review_state')"
+            echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Write MCP config
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          MCP_URL: ${{ steps.cfg.outputs.mcp_url }}
+          MCP_TRANSPORT: ${{ steps.cfg.outputs.mcp_transport }}
         run: |
           cat > /tmp/mcp.json <<EOF
           {
             "mcpServers": {
               "linear": {
-                "type": "http",
-                "url": "https://mcp.linear.app/mcp",
+                "type": "${MCP_TRANSPORT}",
+                "url": "${MCP_URL}",
                 "headers": {
                   "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
                 }
@@ -44,23 +66,84 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            You're picking up Linear issue ${{ github.event.client_payload.issue_id }}.
+            You're picking up Linear issue ${{ env.ISSUE }}.
 
             Operating identity: @claude (Linear OAuth app, actor=app). Don't @-mention anyone.
 
             Steps:
             1. Fetch the issue with mcp__linear__get_issue.
             2. Read this repo's CLAUDE.md and any relevant code to understand context. Don't write code in this step.
-            3. Write a clear, actionable plan. Plan should have: Context, Approach, Files to change, Verification.
-            4. Post the plan as a top-level comment on the issue via mcp__linear__save_comment. The comment body MUST start with this exact line (it's both the visible header and the marker the Worker greps for):
+            3. Write a clear, actionable plan with: Context, Approach, Files to change, Verification.
+            4. Post the plan as a top-level comment on the issue via mcp__linear__save_comment. The comment body MUST:
+               - Start with this exact first line (it's both the visible header and the marker the Worker greps for):
 
-               ### 📋 Plan • react 👍 to approve
+                 ${{ steps.cfg.outputs.plan_marker }}
 
-               Then a blank line, then the plan content (Context, Approach, Files to change, Verification).
-            5. Set the issue state to "Plan Review" via mcp__linear__save_issue.
+               - End with this exact trailer on its own line:
+
+                 _(trace: ${{ env.TRACE }})_
+
+            5. Set the issue state to "${{ steps.cfg.outputs.plan_review_state }}" via mcp__linear__save_issue.
 
             Do not open PRs, do not commit code, do not @-mention. Just plan and comment.
           claude_args: |
             --permission-mode bypassPermissions
             --mcp-config /tmp/mcp.json
             --allowedTools mcp__linear__* Bash Read Grep Glob
+
+      - name: Verify outcome
+        if: always()
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          PLAN_MARKER: ${{ steps.cfg.outputs.plan_marker }}
+          EXPECT_STATE: ${{ steps.cfg.outputs.plan_review_state }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+        run: |
+          set -euo pipefail
+          # Skip verification if the prior step didn't even run (no config etc.)
+          if [ -z "${EXPECT_STATE:-}" ]; then
+            echo "::warning::No config available, skipping verification"
+            exit 0
+          fi
+
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
+
+          # Query issue state + comment bodies
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} comments{nodes{body}}}}",variables:{id:$id}}')
+          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
+
+          STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+          MARKER_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
+
+          echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE plan_comments=$MARKER_COUNT"
+
+          if [ "$STATE" = "$EXPECT_STATE" ] && [ "$MARKER_COUNT" -gt 0 ]; then
+            echo "✓ verification passed"
+            exit 0
+          fi
+
+          echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$MARKER_COUNT"
+
+          # Resolve Stuck state UUID
+          STATES=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg uuid "$ISSUE_UUID" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$uuid}}')")
+          STUCK_UUID=$(echo "$STATES" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          # Post a diagnostic comment
+          BODY="❌ **Pickup failed verification** — _(trace: ${TRACE})_\n\nClaude finished without leaving the issue in the expected state.\n\n- Expected state: \`${EXPECT_STATE}\`\n- Actual state: \`${STATE}\`\n- Plan comments found: ${MARKER_COUNT}\n\n[Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+
+          # Flip to Stuck if state exists
+          if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
+            curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+            echo "Moved to Stuck state"
+          else
+            echo "::warning::Stuck state '$STUCK_STATE' does not exist in this team — skipping state change. Create it in Linear team settings."
+          fi
+
+          exit 1
