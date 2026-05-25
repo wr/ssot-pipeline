@@ -2,16 +2,24 @@
 # Wire a target repo into ssot-pipeline.
 #
 # Usage:
-#   ./bin/init-target-repo.sh <repo-path> <linear-project-id>
+#   ./bin/init-target-repo.sh <repo-path> <linear-project-url-or-id>
+#
+# <linear-project-url-or-id> accepts any of:
+#   - Full URL: https://linear.app/<workspace>/project/<slug>[/<tab>]
+#   - URL slug: <slug>  (e.g. ssot-pipeline-ded011dc9648)
+#   - UUID:     <uuid>  (e.g. f9eb7447-31fb-4e02-b46b-7d147f2d0f55)
 #
 # What it does (fully automatic — pushes direct to main on both sides):
-#   1. Pre-flight: both repos must be on their default branch with clean
+#   1. If <repo-path> isn't a git repo or has no GitHub remote, offers to
+#      `git init` + commit current contents + `gh repo create` (private by
+#      default) so a fresh dir can be wired up in one shot.
+#   2. Pre-flight: both repos must be on their default branch with clean
 #      working trees and in sync with origin. Aborts otherwise.
-#   2. Installs templates/ssot.yml into <repo>/.github/workflows/ssot.yml
-#   3. Adds a `## Source of truth` block to <repo>/CLAUDE.md (creates if missing)
-#   4. Sets repo secrets CLAUDE_CODE_OAUTH_TOKEN + LINEAR_APP_TOKEN
-#   5. Commits + pushes the target repo's stub + CLAUDE.md changes
-#   6. Adds the project_to_repo mapping in this repo's config/pipeline.json,
+#   3. Installs templates/ssot.yml into <repo>/.github/workflows/ssot.yml
+#   4. Adds a `## Source of truth` block to <repo>/CLAUDE.md (creates if missing)
+#   5. Sets repo secrets CLAUDE_CODE_OAUTH_TOKEN + LINEAR_APP_TOKEN
+#   6. Commits + pushes the target repo's stub + CLAUDE.md changes
+#   7. Adds the project_to_repo mapping in this repo's config/pipeline.json,
 #      commits, and pushes to main (which triggers deploy-worker to redeploy
 #      the Worker automatically)
 #
@@ -30,12 +38,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [ $# -ne 2 ]; then
-  echo "Usage: $0 <repo-path> <linear-project-id>" >&2
+  cat >&2 <<EOF
+Usage: $0 <repo-path> <linear-project-url-or-id>
+
+<linear-project-url-or-id> accepts:
+  - Full URL: https://linear.app/<ws>/project/<slug>
+  - URL slug: <slug>  (e.g. ssot-pipeline-ded011dc9648)
+  - UUID:     <uuid>
+EOF
   exit 1
 fi
 
 TARGET_REPO_PATH="$(cd "$1" && pwd)"
-LINEAR_PROJECT_ID="$2"
+LINEAR_PROJECT_INPUT="$2"
 
 if [ ! -d "$TARGET_REPO_PATH" ]; then
   echo "Error: $TARGET_REPO_PATH is not a directory" >&2
@@ -44,31 +59,109 @@ fi
 
 cd "$TARGET_REPO_PATH"
 
+# --- Ensure target is a git repo with a GitHub remote ---
+# If the dir is fresh (no git, or git but no GitHub remote), offer to
+# `git init` + commit current contents + `gh repo create --push`. This is
+# the common "mkdir, drop in some code, wire up the loop" bootstrap path.
+ensure_github_repo() {
+  if gh repo view --json nameWithOwner >/dev/null 2>&1; then
+    return 0  # Already a github-tracked repo
+  fi
+
+  local is_git=0
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    is_git=1
+  fi
+
+  echo
+  if [ "$is_git" = "0" ]; then
+    echo "$TARGET_REPO_PATH is not a git repository."
+  else
+    echo "$TARGET_REPO_PATH is a git repo but has no GitHub remote (or gh can't see it)."
+  fi
+  echo "Create a GitHub repo and push?"
+  echo "  [1] Private  (recommended)"
+  echo "  [2] Public"
+  echo "  [3] Abort"
+  echo -n "Choice [1]: "
+  read -r choice
+  local vis_flag
+  case "${choice:-1}" in
+    1|"") vis_flag="--private" ;;
+    2)    vis_flag="--public"  ;;
+    *)    echo "Aborted." >&2; exit 1 ;;
+  esac
+
+  local repo_name owner
+  repo_name=$(basename "$TARGET_REPO_PATH")
+  owner=$(gh api user --jq '.login')
+
+  if [ "$is_git" = "0" ]; then
+    git init -b main >/dev/null
+    echo "→ git init (branch: main)"
+  fi
+
+  # First commit if none exists yet. Commit whatever's in the dir; if empty,
+  # seed a minimal README so there's something to push.
+  if ! git rev-parse HEAD >/dev/null 2>&1; then
+    if [ -z "$(ls -A . 2>/dev/null | grep -v '^\.git$' || true)" ]; then
+      printf "# %s\n" "$repo_name" > README.md
+      echo "→ Seeded README.md (dir was empty)"
+    fi
+    git add -A
+    git commit -m "Initial commit" >/dev/null
+    echo "→ Initial commit ($(git rev-list --count HEAD) file(s))"
+  fi
+
+  # gh repo create handles remote wiring + push.
+  gh repo create "$owner/$repo_name" "$vis_flag" --source=. --remote=origin --push
+  echo "→ Created $owner/$repo_name ($vis_flag) and pushed"
+}
+ensure_github_repo
+
 # --- Resolve target repo owner/name ---
 if ! REPO_FULL=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null); then
-  echo "Error: $TARGET_REPO_PATH is not a GitHub-tracked repo (or gh isn't authed)" >&2
+  echo "Error: $TARGET_REPO_PATH is still not a GitHub-tracked repo after init step" >&2
   exit 1
 fi
 TARGET_DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
 echo "→ Target repo: $REPO_FULL (default branch: $TARGET_DEFAULT_BRANCH)"
 
-# --- Resolve Linear project name ---
-LINEAR_QUERY=$(cat <<EOF
-{"query":"query(\$id: String!) { project(id: \$id) { id name } }","variables":{"id":"$LINEAR_PROJECT_ID"}}
-EOF
-)
+# --- Resolve Linear project from input (UUID, slug, or URL) ---
+# Strip URL chrome / trailing path/query/fragment to get a clean lookup token.
+LINEAR_LOOKUP=$(echo "$LINEAR_PROJECT_INPUT" | sed -E 's|[?#].*$||')
+if [[ "$LINEAR_LOOKUP" =~ ^https?:// ]]; then
+  LINEAR_LOOKUP=$(echo "$LINEAR_LOOKUP" | sed -E 's|^https?://linear\.app/[^/]+/project/||; s|/.*$||')
+fi
+
 if [ -z "${LINEAR_APP_TOKEN:-}" ]; then
   echo -n "LINEAR_APP_TOKEN (for validation): "
   read -rs LINEAR_APP_TOKEN
   echo
 fi
-PROJECT_NAME=$(curl -sS -X POST https://api.linear.app/graphql \
+
+# Fetch all projects and match by UUID or URL-slug. Personal-team scale fits
+# in a single 250-cap page; add pagination later if that ever changes.
+PROJECTS_RESP=$(curl -sS -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_APP_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "$LINEAR_QUERY" | jq -r '.data.project.name // empty')
+  -d '{"query":"query{projects(first:250){nodes{id name url}}}"}')
 
-if [ -z "$PROJECT_NAME" ]; then
-  echo "Error: could not resolve Linear project $LINEAR_PROJECT_ID — check the UUID and your token" >&2
+if [ "$(echo "$PROJECTS_RESP" | jq 'has("errors")')" = "true" ]; then
+  echo "Error: Linear API returned errors:" >&2
+  echo "$PROJECTS_RESP" | jq '.errors' >&2
+  exit 1
+fi
+
+MATCH=$(echo "$PROJECTS_RESP" | jq -c --arg q "$LINEAR_LOOKUP" \
+  '[.data.projects.nodes[] | select(.id == $q or (.url | endswith("/project/" + $q)))][0] // null')
+LINEAR_PROJECT_ID=$(echo "$MATCH" | jq -r '.id // empty')
+PROJECT_NAME=$(echo "$MATCH" | jq -r '.name // empty')
+
+if [ -z "$LINEAR_PROJECT_ID" ] || [ -z "$PROJECT_NAME" ]; then
+  echo "Error: could not resolve Linear project from '$LINEAR_PROJECT_INPUT'" >&2
+  echo "       Parsed lookup token: '$LINEAR_LOOKUP'" >&2
+  echo "       Accepts UUID, URL slug, or full URL. Verify input + LINEAR_APP_TOKEN scope." >&2
   exit 1
 fi
 echo "→ Linear project: $PROJECT_NAME ($LINEAR_PROJECT_ID)"
