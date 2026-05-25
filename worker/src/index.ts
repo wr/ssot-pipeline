@@ -224,6 +224,7 @@ async function postReaction(commentId: string, emoji: string, env: Env, trace: s
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ query: mutation, variables: { commentId, emoji } }),
+    signal: AbortSignal.timeout(8000),
   });
 
   const text = await resp.text();
@@ -268,6 +269,7 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ query, variables: { id: commentId } }),
+    signal: AbortSignal.timeout(8000),
   });
 
   const text = await resp.text();
@@ -306,7 +308,8 @@ async function fireDispatch(
   const [owner, name] = repo.split("/");
   if (!owner || !name) throw new Error(`Invalid repo "${repo}"`);
 
-  const resp = await fetch(`https://api.github.com/repos/${owner}/${name}/dispatches`, {
+  const url = `https://api.github.com/repos/${owner}/${name}/dispatches`;
+  const reqInit: RequestInit = {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
@@ -314,18 +317,24 @@ async function fireDispatch(
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "ssot-pipeline-worker",
     },
-    body: JSON.stringify({
-      event_type: eventType,
-      client_payload: payload,
-    }),
-  });
+    body: JSON.stringify({ event_type: eventType, client_payload: payload }),
+  };
 
-  if (!resp.ok) {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const resp = await fetch(url, { ...reqInit, signal: AbortSignal.timeout(8000) });
+    if (resp.ok) {
+      console.log(`trace=${trace} fired ${eventType} to ${repo}`, payload);
+      return;
+    }
     const text = await resp.text();
+    if (attempt < maxAttempts && resp.status >= 500) {
+      console.warn(`trace=${trace} dispatch attempt ${attempt} failed (${resp.status}), retrying in 500ms`);
+      await new Promise((r) => setTimeout(r, 500));
+      continue;
+    }
     throw new Error(`Dispatch to ${repo} (${eventType}) failed: ${resp.status} ${text}`);
   }
-
-  console.log(`trace=${trace} fired ${eventType} to ${repo}`, payload);
 }
 
 function bytesToHex(bytes: Uint8Array): string {
