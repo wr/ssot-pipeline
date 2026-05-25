@@ -44,7 +44,38 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Skip if PR modifies workflow files
+        id: skip_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # claude-code-action's OIDC token exchange rejects PRs whose workflow
+          # files differ from main (security: stops a PR from editing the review
+          # workflow to leak the app token). Detect that and exit cleanly with a
+          # one-time explanatory comment, so workflow-editing PRs get a green
+          # check instead of a confusing 401.
+          COUNT=$(gh api "repos/${REPO}/pulls/${PR}/files" --paginate \
+            --jq '[.[] | select(.filename | startswith(".github/workflows/"))] | length')
+          if [ "$COUNT" = "0" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::PR modifies $COUNT workflow file(s) — skipping claude review (trace=${TRACE})"
+          MARKER="<!-- pr-review-skip:workflows -->"
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+            --jq "[.[] | select(.body | contains(\"$MARKER\"))] | length")
+          if [ "$EXISTING" != "0" ]; then
+            echo "Skip notice already posted — not duplicating"
+            exit 0
+          fi
+          BODY=$(printf '%s\n🤖 **pr-review skipped** — this PR modifies `.github/workflows/*`, and `claude-code-action`'"'"'s OIDC token exchange requires workflow files on the PR branch to be byte-identical to `main`. Merge once approved; PRs that do not touch workflows will be reviewed normally. _(trace: %s)_' "$MARKER" "$TRACE")
+          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+
       - name: Resolve effort settings
+        if: steps.skip_check.outputs.skip != 'true'
         id: effort
         run: |
           case "${EFFORT}" in
@@ -68,6 +99,7 @@ jobs:
           esac
 
       - uses: anthropics/claude-code-action@v1
+        if: steps.skip_check.outputs.skip != 'true'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "claude,github-actions"
@@ -97,8 +129,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          SKIP: ${{ steps.skip_check.outputs.skip }}
         run: |
           set -euo pipefail
+          if [ "${SKIP:-false}" = "true" ]; then
+            echo "✓ verification skipped — PR modifies workflows (claude-code-action OIDC limitation)"
+            exit 0
+          fi
           REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "claude[bot]")] | length')
           echo "claude[bot] reviews on PR #$PR: $REVIEWS"
           if [ "$REVIEWS" -gt 0 ]; then
