@@ -2,6 +2,11 @@ name: linear-replan (reusable)
 
 on:
   workflow_call:
+    inputs:
+      config_url:
+        description: 'Pipeline config Worker URL (override for staging)'
+        type: string
+        default: 'https://ssot-pipeline.wells-riley.workers.dev/config'
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -18,7 +23,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      CONFIG_URL: https://ssot-pipeline.wells-riley.workers.dev/config
+      CONFIG_URL: ${{ inputs.config_url }}
       TRACE: ${{ github.event.client_payload.trace_id }}
       ISSUE: ${{ github.event.client_payload.issue_id }}
       COMMENT_ID: ${{ github.event.client_payload.comment_id }}
@@ -46,16 +51,28 @@ jobs:
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           PLANNING_STATE: ${{ steps.cfg.outputs.planning_state }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+          PLAN_MARKER: ${{ steps.cfg.outputs.plan_marker }}
         run: |
           set -euo pipefail
           GQL_URL=https://api.linear.app/graphql
           AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
           CT="Content-Type: application/json"
 
+          # Single query: UUID + plan comments + team states (combines two prior queries)
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
+            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id comments{nodes{body}} team{states{nodes{id name}}}}}",variables:{id:$id}}')")
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           PLANNING_UUID=$(echo "$RESP" | jq -r --arg n "$PLANNING_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+          PLAN_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
+
+          # Persist for later steps
+          echo "ISSUE_UUID=${ISSUE_UUID}" >> "$GITHUB_ENV"
+          echo "STUCK_UUID=${STUCK_UUID}" >> "$GITHUB_ENV"
+          echo "PLAN_COUNT_BEFORE=${PLAN_COUNT}" >> "$GITHUB_ENV"
+
+          echo "trace=${TRACE} plan_comments_before=${PLAN_COUNT}"
 
           if [ -z "$PLANNING_UUID" ] || [ "$PLANNING_UUID" = "null" ]; then
             echo "::warning::Planning state '$PLANNING_STATE' not found in team — skipping early flip"
@@ -66,21 +83,19 @@ jobs:
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$PLANNING_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
           echo "trace=${TRACE} flipped $ISSUE to $PLANNING_STATE"
 
-      - name: Capture plan comment count
+      - name: Post starting comment
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
-          PLAN_MARKER: ${{ steps.cfg.outputs.plan_marker }}
         run: |
           set -euo pipefail
           GQL_URL=https://api.linear.app/graphql
-          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){comments{nodes{body}}}}",variables:{id:$id}}')
-          RESP=$(curl -sS -X POST "$GQL_URL" \
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BODY=$(printf '⚙️ Replanning — [workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
+          curl -sS -X POST "$GQL_URL" \
             -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "$QUERY")
-          PLAN_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
-          echo "trace=${TRACE} plan_comments_before=${PLAN_COUNT}"
-          echo "PLAN_COUNT_BEFORE=${PLAN_COUNT}" >> "$GITHUB_ENV"
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+          echo "trace=${TRACE} posted starting comment for $ISSUE"
 
       - name: Write MCP config
         env:
@@ -143,12 +158,14 @@ jobs:
           AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
           CT="Content-Type: application/json"
 
-          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} comments{nodes{body}}}}",variables:{id:$id}}')
+          # Single query: state + comments + team states (eliminates the conditional second query)
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} comments{nodes{body}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
 
           STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           PLAN_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
+          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
           echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE plan_comments=$PLAN_COUNT plan_count_before=${PLAN_COUNT_BEFORE:-0}"
 
@@ -159,11 +176,8 @@ jobs:
 
           echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$PLAN_COUNT (before=${PLAN_COUNT_BEFORE:-0})"
 
-          STATES=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg uuid "$ISSUE_UUID" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$uuid}}')")
-          STUCK_UUID=$(echo "$STATES" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
-
-          BODY="❌ **Replan failed verification** — _(trace: ${TRACE})_\n\nClaude finished without posting a new plan or leaving the issue in the expected state.\n\n- Expected state: \`${EXPECT_STATE}\`\n- Actual state: \`${STATE}\`\n- Plan comments before: ${PLAN_COUNT_BEFORE:-0}\n- Plan comments after: ${PLAN_COUNT}\n\n[Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          BODY=$(printf '❌ **Replan failed verification** — _(trace: %s)_\n\nClaude finished without posting a new plan or leaving the issue in the expected state.\n\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments before: %d\n- Plan comments after: %d\n\n[Workflow run](%s/%s/actions/runs/%s)' \
+            "$TRACE" "$EXPECT_STATE" "$STATE" "${PLAN_COUNT_BEFORE:-0}" "$PLAN_COUNT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 

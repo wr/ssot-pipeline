@@ -2,6 +2,11 @@ name: linear-implement (reusable)
 
 on:
   workflow_call:
+    inputs:
+      config_url:
+        description: 'Pipeline config Worker URL (override for staging)'
+        type: string
+        default: 'https://ssot-pipeline.wells-riley.workers.dev/config'
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -19,9 +24,13 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
-      actions: write   # allow GITHUB_TOKEN to push changes to .github/workflows/*
+      # claude-code-action mints its own GitHub App installation token via OIDC
+      # (separate from GITHUB_TOKEN). Default minted scopes don't include
+      # `workflows`, so pushes touching .github/workflows/* fail. Asking for it
+      # explicitly here is what lets the loop ship workflow-file changes.
+      actions: write
     env:
-      CONFIG_URL: https://ssot-pipeline.wells-riley.workers.dev/config
+      CONFIG_URL: ${{ inputs.config_url }}
       TRACE: ${{ github.event.client_payload.trace_id }}
       ISSUE: ${{ github.event.client_payload.issue_id }}
     steps:
@@ -50,12 +59,14 @@ jobs:
             echo "in_progress_state=$(echo "$CONFIG" | jq -r '.in_progress_state')"
             echo "in_review_state=$(echo "$CONFIG" | jq -r '.in_review_state')"
             echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
+            echo "branch_prefix=$(echo "$CONFIG" | jq -r '.branch_prefix')"
           } >> "$GITHUB_OUTPUT"
 
       - name: Flip to In Progress (visible feedback)
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           IN_PROGRESS_STATE: ${{ steps.cfg.outputs.in_progress_state }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
         run: |
           set -euo pipefail
           GQL_URL=https://api.linear.app/graphql
@@ -66,6 +77,11 @@ jobs:
             -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           IN_PROGRESS_UUID=$(echo "$RESP" | jq -r --arg n "$IN_PROGRESS_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          # Persist for later steps
+          echo "ISSUE_UUID=${ISSUE_UUID}" >> "$GITHUB_ENV"
+          echo "STUCK_UUID=${STUCK_UUID}" >> "$GITHUB_ENV"
 
           if [ -z "$IN_PROGRESS_UUID" ] || [ "$IN_PROGRESS_UUID" = "null" ]; then
             echo "::warning::In Progress state '$IN_PROGRESS_STATE' not found in team — skipping early flip"
@@ -75,6 +91,20 @@ jobs:
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$IN_PROGRESS_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
           echo "trace=${TRACE} flipped $ISSUE to $IN_PROGRESS_STATE"
+
+      - name: Post starting comment
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          GQL_URL=https://api.linear.app/graphql
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BODY=$(printf '⚙️ Implementing — [workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
+          curl -sS -X POST "$GQL_URL" \
+            -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+          echo "trace=${TRACE} posted starting comment for $ISSUE"
 
       - name: Write MCP config
         env:
@@ -99,10 +129,6 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # claude-code-action mints its own GitHub App installation token via OIDC
-          # (separate from GITHUB_TOKEN). Default minted scopes don't include
-          # `workflows`, so pushes touching .github/workflows/* fail. Asking for it
-          # explicitly here is what lets the loop ship workflow-file changes.
           additional_permissions: |
             workflows: write
           prompt: |
@@ -114,7 +140,7 @@ jobs:
             1. Fetch the issue (mcp__linear__get_issue) and its comments (mcp__linear__list_comments).
             2. Find the approved plan: the comment whose body starts with `${{ steps.cfg.outputs.plan_marker }}`. If multiple plan comments exist, use the latest one (highest `createdAt`). Read it carefully.
             3. Implement per the plan. Use Edit/Write/Bash freely.
-            4. Create a branch named `wells/<issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. wells/w-65-add-hello-script). Branch from main.
+            4. Create a branch named `${{ steps.cfg.outputs.branch_prefix }}<issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. ${{ steps.cfg.outputs.branch_prefix }}w-65-add-hello-script). Branch from main.
             5. Commit your changes. Commit message should focus on *why*. Include `Refs: ${{ env.ISSUE }}` as a trailer.
             6. Push the branch.
             7. Open a ready (non-draft) PR with `gh pr create`:
@@ -147,12 +173,14 @@ jobs:
           AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
           CT="Content-Type: application/json"
 
-          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} attachments{nodes{url}}}}",variables:{id:$id}}')
+          # Single query: state + attachments + team states (eliminates the conditional second query)
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} attachments{nodes{url}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
 
           STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           PR_COUNT=$(echo "$RESP" | jq '[.data.issue.attachments.nodes[] | select(.url | contains("github.com") and contains("/pull/"))] | length')
+          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
           echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE pr_attachments=$PR_COUNT"
 
@@ -163,11 +191,8 @@ jobs:
 
           echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), pr_attachments=$PR_COUNT"
 
-          STATES=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg uuid "$ISSUE_UUID" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$uuid}}')")
-          STUCK_UUID=$(echo "$STATES" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
-
-          BODY="❌ **Implement failed verification** — _(trace: ${TRACE})_\n\nClaude finished without leaving the issue in the expected state with a PR attached.\n\n- Expected state: \`${EXPECT_STATE}\`\n- Actual state: \`${STATE}\`\n- PR attachments found: ${PR_COUNT}\n\n[Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          BODY=$(printf '❌ **Implement failed verification** — _(trace: %s)_\n\nClaude finished without leaving the issue in the expected state with a PR attached.\n\n- Expected state: `%s`\n- Actual state: `%s`\n- PR attachments found: %d\n\n[Workflow run](%s/%s/actions/runs/%s)' \
+            "$TRACE" "$EXPECT_STATE" "$STATE" "$PR_COUNT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 
