@@ -1,9 +1,10 @@
 # GitHub auth setup
 
-Two pieces of auth needed:
+Three pieces of auth needed:
 
 1. **Claude → Anthropic** auth, used inside workflows. Easiest: an `ANTHROPIC_API_KEY` stored as a repo secret.
 2. **Worker → GitHub** auth, used by the Cloudflare Worker to fire `repository_dispatch` events. For v0: a fine-grained PAT. For v1 (cleaner identity): a custom GitHub App named `claude`.
+3. **Reviewer-bot → GitHub** auth, used by `pr-review.yml` to file APPROVE / REQUEST_CHANGES reviews. Needs to be a *different* App than the one that opens PRs (`claude[bot]`), because GitHub blocks PR authors from reviewing their own PRs. See section 4.
 
 ## 1. Anthropic auth (one secret per target repo)
 
@@ -66,3 +67,36 @@ When you're ready to upgrade:
 5. Update `templates/ssot.yml` to forward these secrets, and update `linear-implement.yml` to mint a token via `actions/create-github-app-token@v1` and pass it to `claude-code-action` via `github_token:`. The Worker can also switch from PAT to App-installation tokens — same private key.
 
 Track this upgrade as a follow-up Linear issue in the SSOT Pipeline project.
+
+## 4. Reviewer GitHub App (`wr-claude-reviewer`)
+
+**Why a second App?** `linear-implement.yml` opens PRs as `claude[bot]` (Anthropic's GitHub App). When `pr-review.yml` runs as the same identity, GitHub blocks any APPROVE or REQUEST_CHANGES action — "pull request authors can't approve their own pull request" — so claude can only ever leave neutral `COMMENTED` reviews. That also breaks the auto-fix loop (`pr-fix.yml` waits for a `CHANGES_REQUESTED` event that never arrives).
+
+The fix is a second GitHub App, owned by you, used only for review. `pr-review.yml` mints an installation token from it via `actions/create-github-app-token@v1` and passes it as `github_token:` to `claude-code-action`. Reviews then appear as `wr-claude-reviewer[bot]` and APPROVE/REQUEST_CHANGES stick.
+
+### Create the App (one-time)
+
+1. https://github.com/settings/apps/new
+   - **Name:** `wr-claude-reviewer` (must be globally unique; substitute your handle if taken)
+   - **Homepage URL:** any
+   - **Webhook → Active:** unchecked
+   - **Repository permissions:**
+     - Pull requests: **Read and write** (file reviews)
+     - Contents: **Read** (`claude-code-action` reads the diff)
+     - Issues: **Read and write** (post review-summary comments)
+     - Metadata: **Read** (default)
+   - **Where can this be installed:** Only on this account
+2. Create → note the **App ID** → "Generate a private key" → save the `.pem` file.
+3. Install the App on every target repo (App's "Install App" page).
+4. Seed credentials into macOS Keychain so `bin/init-target-repo.sh` picks them up:
+   ```bash
+   security add-generic-password -U -s ssot-pipeline -a CLAUDE_REVIEWER_APP_ID -w '<app-id>'
+   security add-generic-password -U -s ssot-pipeline -a CLAUDE_REVIEWER_APP_KEY \
+     -w "$(cat /path/to/wr-claude-reviewer.*.private-key.pem)"
+   ```
+   The PEM is multi-line; Keychain stores the bytes and `load_secret` hex-decodes on read. To rotate, regenerate the key in the App settings and re-run the seed commands with `-U`.
+5. For each target repo, re-run `./bin/init-target-repo.sh` (or set the two secrets directly with `gh secret set CLAUDE_REVIEWER_APP_ID --repo wr/<target>` and the same for the PEM).
+
+### Updating the bot login
+
+If you pick a different App name, also update `review_bot_login` and `fix_reviewer_logins[0]` in `config/pipeline.json`, and the `select(.user.login == "wr-claude-reviewer[bot]")` filters in `.github/workflows/pr-review.yml` (verify step) and `.github/workflows/pr-fix.yml` (cap counter). The login is the App slug with `[bot]` appended.
