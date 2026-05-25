@@ -19,24 +19,27 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 2. Install the `claude[bot]` GitHub App — see [`docs/github-app-setup.md`](./docs/github-app-setup.md)
 3. First-time Worker deploy — `cd worker && npx wrangler deploy`. After that, the `deploy-worker` GitHub Action redeploys automatically on every merge that touches `config/pipeline.json` or `worker/**` (needs repo secret `CLOUDFLARE_API_TOKEN`).
 4. Register the Linear webhook → your Worker URL
-5. Run `./bin/init-target-repo.sh <repo-path> <linear-project-id>` for each project you want to wire up
+5. Run `./bin/init-target-repo.sh <repo-path> <linear-project-url-or-id>` for each project you want to wire up
 
 ## Adding a new target repo
 
 Per-repo, setup is one command:
 
 ```
-./bin/init-target-repo.sh <repo-path> <linear-project-id>
+./bin/init-target-repo.sh <repo-path> <linear-project-url-or-id>
 ```
 
-Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` exported (or you'll be prompted). Both repos (the target and this one) must be on their default branch with clean working trees in sync with origin — the script aborts otherwise rather than risk clobbering local work.
+The Linear arg accepts a full project URL (`https://linear.app/<ws>/project/<slug>`), a bare URL slug (`<slug>`), or the UUID — copy whichever is easiest from the Linear UI.
+
+Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` exported (or you'll be prompted). If the target dir isn't a git repo (or has no GitHub remote), the script prompts to `git init` + `gh repo create` (private by default) and pushes the current dir contents as the first commit before wiring up. Once the target has a remote, both repos must be on their default branch with clean working trees in sync with origin — the script aborts otherwise rather than risk clobbering local work.
 
 The script does everything end-to-end:
-1. Installs `templates/ssot.yml` → `<repo>/.github/workflows/ssot.yml` (wires up `linear-pickup`, `linear-implement`, `pr-review`)
-2. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
-3. Sets repo secrets `CLAUDE_CODE_OAUTH_TOKEN` and `LINEAR_APP_TOKEN`
-4. Commits + pushes the target repo's stub + CLAUDE.md changes
-5. `jq`-edits this repo's `config/pipeline.json` to add the `project_to_repo` mapping, commits, and pushes to `main` — the `deploy-worker` Action then redeploys the Worker automatically
+1. If the target isn't a GitHub-tracked repo yet, prompts for visibility (private/public/abort) and runs `git init` + initial commit + `gh repo create --push`.
+2. Installs `templates/ssot.yml` → `<repo>/.github/workflows/ssot.yml` (wires up `linear-pickup`, `linear-implement`, `pr-review`)
+3. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
+4. Sets repo secrets `CLAUDE_CODE_OAUTH_TOKEN` and `LINEAR_APP_TOKEN`
+5. Commits + pushes the target repo's stub + CLAUDE.md changes
+6. `jq`-edits this repo's `config/pipeline.json` to add the `project_to_repo` mapping, commits, and pushes to `main` — the `deploy-worker` Action then redeploys the Worker automatically
 
 Re-runs are idempotent: each step skips itself if its effect is already in place.
 
