@@ -1,13 +1,13 @@
 # ssot-pipeline
 
-Drives an autonomous coding loop: Linear issues in `Todo (AI)` → Claude plans → you 👍 the plan → Claude implements → PR opens → Claude reviews → you approve → ship. Plus auto-review on every PR in target repos.
+Drives an autonomous coding loop: Linear issues in `Todo (AI)` → Claude plans → you 👍 the plan → Claude implements → PR opens → Claude reviews → (auto-fix if changes requested) → you approve → ship. Plus auto-review on every PR in target repos.
 
 State lives in Linear and GitHub. Nothing to host long-term except a free Cloudflare Worker.
 
 ## What's in the box
 
 - **`config/pipeline.json`** — single source of truth for all magic strings (plan marker, MCP URL, state names, approval rules, project→repo routing). Change here, redeploy Worker, all consumers pick it up.
-- **`.github/workflows/`** — three reusable workflows (`linear-pickup`, `linear-implement`, `pr-review`). Target repos consume them via `uses:`. Auto-close on PR merge is handled by Linear's native GitHub integration (PR body uses `Closes W-XX`).
+- **`.github/workflows/`** — five reusable workflows (`linear-pickup`, `linear-implement`, `linear-replan`, `pr-review`, `pr-fix`). Target repos consume them via `uses:`. Auto-close on PR merge is handled by Linear's native GitHub integration (PR body uses `Closes W-XX`).
 - **`worker/`** — Cloudflare Worker that receives Linear webhooks, generates trace IDs, fires GitHub `repository_dispatch` events. Also serves `GET /config` so workflows can read the shared config at run time.
 - **`templates/ssot.yml`** — the ~20-line stub a target repo drops in to wire itself up.
 - **`bin/init-target-repo.sh`** — one-command setup for a new target repo.
@@ -67,6 +67,20 @@ Todo (AI) ──webhook──▶ Planning ──plan posted──▶ Plan Review
 Each step is a fresh headless `claude -p` invocation. No session resume, no in-process pause. If a webhook is re-fired, the workflows are idempotent.
 
 The `Planning` and `In Progress` flips happen at the very start of `linear-pickup` / `linear-implement` (before invoking Claude) so you see visible motion within seconds of moving an issue to `Todo (AI)` or 👍-ing a plan.
+
+## Review & Fix Loop
+
+When `pr-review` posts a `REQUEST_CHANGES` review on a PR, `pr-fix` fires automatically: it checks out the PR branch, reads the inline `blocking` findings, dispatches Claude to fix them, commits, and pushes. The new commits trigger `pr-review` again via `synchronize`, closing the loop.
+
+```
+In Review ──REQUEST_CHANGES──▶ In Progress ──fix pushed──▶ In Review ──re-review──▶ APPROVE
+            (claude[bot]                    (claude[bot]                            (or another
+             review)                         commit)                                 fix cycle)
+```
+
+Capped at `pr_fix_max_attempts` (default 2) from `config/pipeline.json`. On the (N+1)th REQUEST_CHANGES, the workflow posts a stuck comment, flips Linear to `Stuck`, and exits — human intervention required.
+
+By default only reviews by `claude[bot]` or `wr` trigger the fix; edit `fix_reviewer_logins` in `config/pipeline.json` to widen.
 
 ## Trace IDs
 

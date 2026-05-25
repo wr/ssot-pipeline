@@ -1,0 +1,318 @@
+name: pr-fix (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      config_url:
+        description: 'Pipeline config Worker URL (override for staging)'
+        type: string
+        default: 'https://ssot-pipeline.wells-riley.workers.dev/config'
+      trace_id:
+        description: 'Trace ID for cross-system correlation (generated if not provided)'
+        type: string
+        default: ''
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      LINEAR_APP_TOKEN:
+        required: true
+
+jobs:
+  fix:
+    concurrency:
+      group: pr-fix-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: write   # required: fixes may touch .github/workflows/* (mirrors linear-implement)
+    env:
+      CONFIG_URL: ${{ inputs.config_url }}
+      PR: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+      REVIEWER: ${{ github.event.review.user.login }}
+    steps:
+      - name: Trace
+        id: trace
+        run: |
+          TRACE="${{ inputs.trace_id }}"
+          [ -z "$TRACE" ] && TRACE=$(openssl rand -hex 4)
+          echo "TRACE=$TRACE" >> "$GITHUB_ENV"
+          echo "🔗 pr=#${PR} reviewer=${REVIEWER} trace=${TRACE}"
+
+      - name: Fetch pipeline config
+        id: cfg
+        run: |
+          set -euo pipefail
+          CONFIG=$(curl -sS "$CONFIG_URL")
+          {
+            echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
+            echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
+            echo "in_progress_state=$(echo "$CONFIG" | jq -r '.in_progress_state')"
+            echo "in_review_state=$(echo "$CONFIG" | jq -r '.in_review_state')"
+            echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
+            echo "max_attempts=$(echo "$CONFIG" | jq -r '.pr_fix_max_attempts')"
+            echo "branch_prefix=$(echo "$CONFIG" | jq -r '.branch_prefix')"
+          } >> "$GITHUB_OUTPUT"
+          # Allowed reviewers as a JSON array string — checked in the gate step.
+          echo "fix_reviewer_logins=$(echo "$CONFIG" | jq -c '.fix_reviewer_logins')" >> "$GITHUB_OUTPUT"
+
+      - name: Gate on reviewer
+        id: gate
+        env:
+          ALLOWED: ${{ steps.cfg.outputs.fix_reviewer_logins }}
+        run: |
+          set -euo pipefail
+          # Caller's `if:` already filters on review.state == 'changes_requested'.
+          # We just need to confirm the reviewer is one we trust to drive the loop.
+          MATCH=$(echo "$ALLOWED" | jq --arg u "$REVIEWER" 'any(. == $u)')
+          if [ "$MATCH" != "true" ]; then
+            echo "::notice::Reviewer '$REVIEWER' not in fix_reviewer_logins — skipping (trace=${TRACE})"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Check fix-attempt cap
+        if: steps.gate.outputs.skip != 'true'
+        id: cap
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAX: ${{ steps.cfg.outputs.max_attempts }}
+        run: |
+          set -euo pipefail
+          # The triggering review is already in the API response, so a clean PR
+          # on the very first REQUEST_CHANGES has count=1. We allow up to MAX
+          # fix runs, so we bail when count > MAX (i.e. the (MAX+1)th request).
+          COUNT=$(gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+            --jq '[.[] | select(.user.login=="claude[bot]" and .state=="CHANGES_REQUESTED")] | length')
+          echo "claude[bot] REQUEST_CHANGES count on PR #${PR}: $COUNT (max=$MAX)"
+          if [ "$COUNT" -gt "$MAX" ]; then
+            echo "exceeded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exceeded=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve Linear issue ID
+        if: steps.gate.outputs.skip != 'true'
+        id: issue
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          # PR body trailer (inserted by linear-implement) is canonical.
+          ISSUE=$(echo "$PR_BODY" | grep -oiE 'Closes[[:space:]]+W-[0-9]+' | head -1 | grep -oiE 'W-[0-9]+' | tr '[:lower:]' '[:upper:]') || true
+          if [ -z "$ISSUE" ]; then
+            # Fallback: branch name like wells/w-65-add-hello-script
+            ISSUE=$(echo "$HEAD_REF" | grep -oiE 'w-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]') || true
+          fi
+          if [ -z "$ISSUE" ]; then
+            echo "::warning::Could not resolve Linear issue ID from PR body or branch — Linear updates will be skipped (trace=${TRACE})"
+          else
+            echo "ISSUE=$ISSUE" >> "$GITHUB_ENV"
+            echo "resolved $ISSUE from $( [ -n "$(echo "$PR_BODY" | grep -oiE 'Closes[[:space:]]+W-[0-9]+')" ] && echo 'PR body' || echo 'branch name' )"
+          fi
+
+      - name: Capture starting SHA
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          BEFORE_SHA=$(git rev-parse HEAD)
+          echo "BEFORE_SHA=${BEFORE_SHA}" >> "$GITHUB_ENV"
+          echo "Starting at $BEFORE_SHA"
+
+      - name: Bail if cap exceeded
+        if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+          COUNT: ${{ steps.cap.outputs.count }}
+          MAX: ${{ steps.cfg.outputs.max_attempts }}
+        run: |
+          set -euo pipefail
+          BODY=$(printf '🛑 **Auto-fix cap reached** — claude[bot] has requested changes %s times (max %s). Not dispatching another fix. Human intervention needed. _(trace: %s)_' "$COUNT" "$MAX" "$TRACE")
+          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+
+          if [ -z "${ISSUE:-}" ]; then
+            echo "::notice::No Linear issue resolved — skipping Stuck flip"
+            exit 0
+          fi
+
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
+
+          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          LINEAR_BODY=$(printf '🛑 **Auto-fix cap reached on PR #%s** — claude[bot] has requested changes %s times (max %s). Not dispatching another fix. _(trace: %s)_' "$PR" "$COUNT" "$MAX" "$TRACE")
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+
+          if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
+            curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+            echo "trace=${TRACE} flipped $ISSUE to Stuck"
+          fi
+
+      - name: Configure git
+        if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
+        run: |
+          git config user.name "claude[bot]"
+          git config user.email "claude[bot]@users.noreply.github.com"
+
+      - name: Flip Linear to In Progress
+        if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true' && env.ISSUE != ''
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          IN_PROGRESS_STATE: ${{ steps.cfg.outputs.in_progress_state }}
+        run: |
+          set -euo pipefail
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
+
+          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+          IN_PROGRESS_UUID=$(echo "$RESP" | jq -r --arg n "$IN_PROGRESS_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          echo "ISSUE_UUID=${ISSUE_UUID}" >> "$GITHUB_ENV"
+
+          if [ -z "$IN_PROGRESS_UUID" ] || [ "$IN_PROGRESS_UUID" = "null" ]; then
+            echo "::warning::In Progress state '$IN_PROGRESS_STATE' not found — skipping flip"
+            exit 0
+          fi
+
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$IN_PROGRESS_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+          echo "trace=${TRACE} flipped $ISSUE to $IN_PROGRESS_STATE"
+
+      - name: Post starting Linear comment
+        if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true' && env.ISSUE_UUID != ''
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          GQL_URL=https://api.linear.app/graphql
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BODY=$(printf '⚙️ Fixing review comments on PR #%s — [workflow run](%s) _(trace: %s)_' "$PR" "$RUN_URL" "$TRACE")
+          curl -sS -X POST "$GQL_URL" \
+            -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+
+      - name: Write MCP config
+        if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          MCP_URL: ${{ steps.cfg.outputs.mcp_url }}
+          MCP_TRANSPORT: ${{ steps.cfg.outputs.mcp_transport }}
+        run: |
+          cat > /tmp/mcp.json <<EOF
+          {
+            "mcpServers": {
+              "linear": {
+                "type": "${MCP_TRANSPORT}",
+                "url": "${MCP_URL}",
+                "headers": {
+                  "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
+                }
+              }
+            }
+          }
+          EOF
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          additional_permissions: |
+            workflows: write
+          prompt: |
+            You're fixing review comments on PR #${{ env.PR }} in repo ${{ env.REPO }}. The most recent review by `${{ env.REVIEWER }}` requested changes — your job is to address every `blocking` finding, push the fixes, and update Linear.
+
+            Operating identity: claude[bot] (GitHub) + @claude (Linear). Don't @-mention anyone.
+
+            Context:
+            - Linear issue: ${{ env.ISSUE || '(none — skip Linear-side updates)' }}
+            - Trace: ${{ env.TRACE }}
+            - Branch is already checked out at the PR head (${{ github.event.pull_request.head.ref }}); the working tree is ready to edit.
+
+            Steps:
+            1. Read this repo's CLAUDE.md to understand conventions.
+            2. List inline review comments on PR #${{ env.PR }} via the GitHub MCP. Focus on the most recent review submitted by `${{ env.REVIEWER }}`. Identify all findings labeled `blocking` (in the comment body) — these are the must-fix items. Ignore `nit` and `question` findings.
+            3. Also fetch the review body itself — sometimes blocking findings sit there too.
+            4. Fix every blocking finding. Use Edit/Write/Bash freely.
+            5. Commit with a *why*-focused message. If a Linear issue is set above, include `Refs: ${{ env.ISSUE }}` as a trailer. If multiple unrelated fixes, one commit is fine — the PR already groups them.
+            6. Push to the existing branch: `git push origin HEAD`.
+            ${{ env.ISSUE && format('7. Set Linear issue {0} state to "{1}" via mcp__linear__save_issue.', env.ISSUE, steps.cfg.outputs.in_review_state) || '' }}
+            ${{ env.ISSUE && format('8. Post a Linear comment on {0}: "Pushed fixes addressing the blocking findings on PR #{1}. _(trace: {2})_"', env.ISSUE, env.PR, env.TRACE) || '' }}
+
+            If you genuinely cannot fix something (ambiguous review, conflicting requests, tests fail): post a comment on the PR explaining why, ${{ env.ISSUE && format('post a Linear comment on {0} with the same explanation,', env.ISSUE) || '' }} and stop without pushing. Don't push broken code.
+          claude_args: |
+            --permission-mode bypassPermissions
+            --mcp-config /tmp/mcp.json
+            --allowedTools mcp__linear__* mcp__github__* Bash Read Write Edit Grep Glob
+
+      - name: Verify outcome
+        if: always() && steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.event.pull_request.head.ref }}"
+          NEW_COMMITS=$(git rev-list "${BEFORE_SHA}..origin/${{ github.event.pull_request.head.ref }}" | wc -l | tr -d ' ')
+          echo "trace=${TRACE} verify: new commits since ${BEFORE_SHA}: $NEW_COMMITS"
+
+          if [ "$NEW_COMMITS" -gt 0 ]; then
+            echo "✓ verification passed"
+            exit 0
+          fi
+
+          echo "::error::Verification failed — no new claude[bot] commits pushed to PR #$PR"
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          PR_BODY=$(printf '❌ **Auto-fix failed verification** — Claude finished without pushing any new commits. [Workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
+          gh pr comment "$PR" --repo "$REPO" --body "$PR_BODY" || true
+
+          if [ -z "${ISSUE:-}" ] || [ -z "${ISSUE_UUID:-}" ]; then
+            echo "::warning::No Linear issue resolved — skipping Stuck flip"
+            exit 1
+          fi
+
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
+
+          STUCK_UUID=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$id}}')" \
+            | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          LINEAR_BODY=$(printf '❌ **Auto-fix failed verification on PR #%s** — Claude did not push any new commits. [Workflow run](%s) _(trace: %s)_' "$PR" "$RUN_URL" "$TRACE")
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+
+          if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
+            curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+            echo "trace=${TRACE} flipped $ISSUE to Stuck"
+          fi
+
+          exit 1
