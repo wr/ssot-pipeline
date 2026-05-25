@@ -30,12 +30,36 @@
 #   - gh CLI authenticated
 #   - jq installed
 #   - CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and LINEAR_APP_TOKEN
-#     exported (or you'll be prompted)
+#     available via env, macOS Keychain, or interactive prompt.
+#     Keychain seed (one-time, recommended):
+#       security add-generic-password -s ssot-pipeline -a LINEAR_APP_TOKEN -w '<token>'
+#       security add-generic-password -s ssot-pipeline -a CLAUDE_CODE_OAUTH_TOKEN -w '<token>'
+#     (Add `-U` to overwrite an existing entry.)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# load_secret <NAME>
+# Resolve a credential by name in order: env var → macOS Keychain → prompt.
+# Keychain entries live under service "ssot-pipeline", account = $NAME.
+# Seed once: security add-generic-password -s ssot-pipeline -a $NAME -w '<token>'
+# (use -U to overwrite an existing entry).
+load_secret() {
+  local name="$1"
+  local value="${!name:-}"
+  if [ -z "$value" ] && command -v security >/dev/null 2>&1; then
+    value=$(security find-generic-password -w -s ssot-pipeline -a "$name" 2>/dev/null || true)
+    [ -n "$value" ] && echo "→ Loaded $name from Keychain" >&2
+  fi
+  if [ -z "$value" ]; then
+    echo -n "$name: " >&2
+    read -rs value
+    echo >&2
+  fi
+  printf "%s" "$value"
+}
 
 if [ $# -ne 2 ]; then
   cat >&2 <<EOF
@@ -134,11 +158,7 @@ if [[ "$LINEAR_LOOKUP" =~ ^https?:// ]]; then
   LINEAR_LOOKUP=$(echo "$LINEAR_LOOKUP" | sed -E 's|^https?://linear\.app/[^/]+/project/||; s|/.*$||')
 fi
 
-if [ -z "${LINEAR_APP_TOKEN:-}" ]; then
-  echo -n "LINEAR_APP_TOKEN (for validation): "
-  read -rs LINEAR_APP_TOKEN
-  echo
-fi
+LINEAR_APP_TOKEN=$(load_secret LINEAR_APP_TOKEN)
 
 # Fetch all projects and match by UUID or URL-slug. Personal-team scale fits
 # in a single 250-cap page; add pagination later if that ever changes.
@@ -215,12 +235,8 @@ set_secret() {
     echo "→ Secret $name already set on $REPO_FULL (skipping — delete first to rotate)"
     return
   fi
-  local value="${!name:-}"
-  if [ -z "$value" ]; then
-    echo -n "$name: "
-    read -rs value
-    echo
-  fi
+  local value
+  value=$(load_secret "$name")
   if [ -z "$value" ]; then
     echo "  (skipped — empty value)"
     return

@@ -31,7 +31,16 @@ Per-repo, setup is one command:
 
 The Linear arg accepts a full project URL (`https://linear.app/<ws>/project/<slug>`), a bare URL slug (`<slug>`), or the UUID — copy whichever is easiest from the Linear UI.
 
-Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` exported (or you'll be prompted). If the target dir isn't a git repo (or has no GitHub remote), the script prompts to `git init` + `gh repo create` (private by default) and pushes the current dir contents as the first commit before wiring up. Once the target has a remote, both repos must be on their default branch with clean working trees in sync with origin — the script aborts otherwise rather than risk clobbering local work.
+Prereqs: `gh` CLI authenticated, `jq` installed, and `CLAUDE_CODE_OAUTH_TOKEN` + `LINEAR_APP_TOKEN` resolvable via env var, macOS Keychain, or interactive prompt. To skip prompts every run, seed Keychain once:
+
+```
+security add-generic-password -s ssot-pipeline -a LINEAR_APP_TOKEN -w '<token>'
+security add-generic-password -s ssot-pipeline -a CLAUDE_CODE_OAUTH_TOKEN -w '<token>'
+```
+
+(Add `-U` to overwrite if an entry already exists.) The script reads in order: env → Keychain → prompt.
+
+If the target dir isn't a git repo (or has no GitHub remote), the script prompts to `git init` + `gh repo create` (private by default) and pushes the current dir contents as the first commit before wiring up. Once the target has a remote, both repos must be on their default branch with clean working trees in sync with origin — the script aborts otherwise rather than risk clobbering local work.
 
 The script does everything end-to-end:
 1. If the target isn't a GitHub-tracked repo yet, prompts for visibility (private/public/abort) and runs `git init` + initial commit + `gh repo create --push`.
