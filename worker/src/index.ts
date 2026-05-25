@@ -89,53 +89,85 @@ async function verifySignature(
 
 async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): Promise<void> {
   const issue = event.data as LinearIssue;
+  const stateName = issue.state?.name;
 
-  if (issue.state?.name !== config.todo_ai_state) {
-    console.log(`trace=${trace} issue ${issue.identifier}: state "${issue.state?.name}" != "${config.todo_ai_state}", skipping`);
-    return;
-  }
+  if (stateName === config.todo_ai_state) {
+    // Dedupe: only fire on the *transition into* Todo (AI), not on every update
+    // while the issue sits there. Linear sends multiple events for a new issue
+    // (create + updates as project/priority/etc. settle) — without this, each
+    // one re-fires pickup and we get duplicate Plan comments. See W-88.
+    if (event.action === "update") {
+      const uf = event.updatedFrom;
+      if (uf === undefined || uf === null) {
+        // Defensive: better one extra plan than zero. Log so regressions are visible.
+        console.log(`trace=${trace} issue ${issue.identifier}: update event missing updatedFrom — firing anyway`);
+      } else if (!("state" in uf) && !("stateId" in uf)) {
+        console.log(`trace=${trace} issue ${issue.identifier}: update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
+        return;
+      }
+    }
 
-  // Dedupe: only fire on the *transition into* Todo (AI), not on every update
-  // while the issue sits there. Linear sends multiple events for a new issue
-  // (create + updates as project/priority/etc. settle) — without this, each
-  // one re-fires pickup and we get duplicate Plan comments. See W-88.
-  if (event.action === "update") {
-    const uf = event.updatedFrom;
-    if (uf === undefined || uf === null) {
-      // Defensive: better one extra plan than zero. Log so regressions are visible.
-      console.log(`trace=${trace} issue ${issue.identifier}: update event missing updatedFrom — firing anyway`);
-    } else if (!("state" in uf) && !("stateId" in uf)) {
-      console.log(`trace=${trace} issue ${issue.identifier}: update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
+    const projectId = issue.projectId || issue.project?.id;
+    if (!projectId) {
+      console.log(`trace=${trace} issue ${issue.identifier}: no project, skipping`);
       return;
     }
-  }
 
-  const projectId = issue.projectId || issue.project?.id;
-  if (!projectId) {
-    console.log(`trace=${trace} issue ${issue.identifier}: no project, skipping`);
-    return;
-  }
+    const repo = lookupRepo(projectId);
+    if (!repo) {
+      console.log(`trace=${trace} issue ${issue.identifier}: no repo mapping for project ${projectId}`);
+      return;
+    }
 
-  const repo = lookupRepo(projectId);
-  if (!repo) {
-    console.log(`trace=${trace} issue ${issue.identifier}: no repo mapping for project ${projectId}`);
-    return;
-  }
+    console.log(`trace=${trace} issue ${issue.identifier}: firing linear-pickup (action=${event.action})`);
+    await fireDispatch(repo, "linear-pickup", { issue_id: issue.identifier, trace_id: trace }, env, trace);
 
-  console.log(`trace=${trace} issue ${issue.identifier}: firing linear-pickup (action=${event.action})`);
-  await fireDispatch(repo, "linear-pickup", { issue_id: issue.identifier, trace_id: trace }, env, trace);
+    try {
+      await postReaction({ issueId: issue.id }, config.approval_ack_emoji, env, trace);
+    } catch (err) {
+      console.error(`trace=${trace} failed to post issue ack reaction:`, err);
+    }
+  } else if (stateName === config.in_progress_state) {
+    // Human manually moved issue to In Progress — treat as plan approval.
+    // Gate on actorId to prevent the workflow's own "Flip to In Progress" step
+    // (which runs under the Linear app token) from looping back here.
+    if (!event.actorId || !(config.approved_user_ids as string[]).includes(event.actorId)) {
+      console.log(`trace=${trace} issue ${issue.identifier}: In Progress transition by non-approved actor ${event.actorId ?? "unknown"}, skipping`);
+      return;
+    }
 
-  try {
-    await postReaction({ issueId: issue.id }, config.approval_ack_emoji, env, trace);
-  } catch (err) {
-    console.error(`trace=${trace} failed to post issue ack reaction:`, err);
+    // Must be an actual state transition, not a different field update.
+    if (event.action === "update") {
+      const uf = event.updatedFrom;
+      if (uf !== undefined && uf !== null && !("state" in uf) && !("stateId" in uf)) {
+        console.log(`trace=${trace} issue ${issue.identifier}: In Progress update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
+        return;
+      }
+    }
+
+    const projectId = issue.projectId || issue.project?.id;
+    if (!projectId) {
+      console.log(`trace=${trace} issue ${issue.identifier}: no project, skipping`);
+      return;
+    }
+
+    const repo = lookupRepo(projectId);
+    if (!repo) {
+      console.log(`trace=${trace} issue ${issue.identifier}: no repo mapping for project ${projectId}`);
+      return;
+    }
+
+    console.log(`trace=${trace} issue ${issue.identifier}: firing linear-implement (manual In Progress by actor ${event.actorId})`);
+    await fireDispatch(repo, "linear-implement", { issue_id: issue.identifier, trace_id: trace }, env, trace);
+  } else {
+    console.log(`trace=${trace} issue ${issue.identifier}: state "${stateName}" not actionable, skipping`);
   }
 }
 
 async function handleReactionCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
   const reaction = event.data as LinearReaction;
 
-  if (reaction.emoji !== config.approval_emoji) return;
+  if (!(config.approval_emojis as string[]).includes(reaction.emoji)) return;
   if (!config.approved_user_ids.includes(reaction.userId)) return;
   if (!reaction.commentId) return;
 
@@ -208,6 +240,15 @@ async function handleCommentCreate(event: LinearEvent, env: Env, trace: string):
   const repo = lookupRepo(projectId);
   if (!repo) {
     console.log(`trace=${trace} Comment.create: no repo mapping for project ${projectId}`);
+    return;
+  }
+
+  const bodyLower = comment.body.toLowerCase();
+  const isApproval = (config.approval_phrases as string[]).some((phrase) => bodyLower.includes(phrase.toLowerCase()));
+
+  if (isApproval) {
+    console.log(`trace=${trace} issue ${issueId}: firing linear-implement (approval phrase in comment=${comment.id})`);
+    await fireDispatch(repo, "linear-implement", { issue_id: issueId, approval_comment_id: comment.id, trace_id: trace }, env, trace);
     return;
   }
 
@@ -372,6 +413,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 type LinearEvent = {
   type: string;
   action: string;
+  actorId?: string;
   data: unknown;
   updatedFrom?: Record<string, unknown> | null;
 };
