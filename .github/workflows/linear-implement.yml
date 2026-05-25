@@ -139,6 +139,8 @@ jobs:
             Steps:
             1. Fetch the issue (mcp__linear__get_issue) and its comments (mcp__linear__list_comments).
             2. Find the approved plan: the comment whose body starts with `${{ steps.cfg.outputs.plan_marker }}`. If multiple plan comments exist, use the latest one (highest `createdAt`). Read it carefully.
+               - If `${{ github.event.client_payload.approval_comment_id }}` is non-empty, that comment is the approval trigger — fetch it and check whether it contains amendments (nits, naming changes, additional requirements) to fold into the implementation.
+               - Also check for any other human (non-bot) replies posted after the plan comment that add requirements or constraints, and incorporate those too.
             3. Implement per the plan. Use Edit/Write/Bash freely.
             4. Create a branch named `${{ steps.cfg.outputs.branch_prefix }}<issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. ${{ steps.cfg.outputs.branch_prefix }}w-65-add-hello-script). Branch from main.
             5. Commit your changes. Commit message should focus on *why*. Include `Refs: ${{ env.ISSUE }}` as a trailer.
