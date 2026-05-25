@@ -124,6 +124,12 @@ async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): P
 
   console.log(`trace=${trace} issue ${issue.identifier}: firing linear-pickup (action=${event.action})`);
   await fireDispatch(repo, "linear-pickup", { issue_id: issue.identifier, trace_id: trace }, env, trace);
+
+  try {
+    await postReaction({ issueId: issue.id }, config.approval_ack_emoji, env, trace);
+  } catch (err) {
+    console.error(`trace=${trace} failed to post issue ack reaction:`, err);
+  }
 }
 
 async function handleReactionCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
@@ -162,7 +168,7 @@ async function handleReactionCreate(event: LinearEvent, env: Env, trace: string)
   // Best-effort 🤖 ack on the plan comment so the user gets immediate visible
   // confirmation. Errors are logged but never bubble.
   try {
-    await postReaction(reaction.commentId, config.approval_ack_emoji, env, trace);
+    await postReaction({ commentId: reaction.commentId }, config.approval_ack_emoji, env, trace);
   } catch (err) {
     console.error(`trace=${trace} failed to post ack reaction:`, err);
   }
@@ -207,15 +213,30 @@ async function handleCommentCreate(event: LinearEvent, env: Env, trace: string):
 
   console.log(`trace=${trace} issue ${issueId}: firing linear-replan (comment=${comment.id})`);
   await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: comment.id, trace_id: trace }, env, trace);
+
+  try {
+    await postReaction({ commentId: comment.id }, config.approval_ack_emoji, env, trace);
+  } catch (err) {
+    console.error(`trace=${trace} failed to post comment ack reaction:`, err);
+  }
 }
 
-async function postReaction(commentId: string, emoji: string, env: Env, trace: string): Promise<void> {
-  const mutation = `
-    mutation($commentId: String!, $emoji: String!) {
-      reactionCreate(input: { commentId: $commentId, emoji: $emoji }) {
-        success
-      }
-    }`;
+async function postReaction(
+  target: { commentId: string } | { issueId: string },
+  emoji: string,
+  env: Env,
+  trace: string,
+): Promise<void> {
+  const isComment = "commentId" in target;
+  const mutation = isComment
+    ? `mutation($id: String!, $emoji: String!) {
+        reactionCreate(input: { commentId: $id, emoji: $emoji }) { success }
+      }`
+    : `mutation($id: String!, $emoji: String!) {
+        reactionCreate(input: { issueId: $id, emoji: $emoji }) { success }
+      }`;
+  const id = isComment ? target.commentId : target.issueId;
+  const targetLabel = isComment ? `comment ${id}` : `issue ${id}`;
 
   const resp = await fetch("https://api.linear.app/graphql", {
     method: "POST",
@@ -223,7 +244,7 @@ async function postReaction(commentId: string, emoji: string, env: Env, trace: s
       Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ query: mutation, variables: { commentId, emoji } }),
+    body: JSON.stringify({ query: mutation, variables: { id, emoji } }),
     signal: AbortSignal.timeout(8000),
   });
 
@@ -246,7 +267,7 @@ async function postReaction(commentId: string, emoji: string, env: Env, trace: s
     return;
   }
 
-  console.log(`trace=${trace} posted ${emoji} reaction to comment ${commentId}: success=${data.data?.reactionCreate?.success}`);
+  console.log(`trace=${trace} posted ${emoji} reaction to ${targetLabel}: success=${data.data?.reactionCreate?.success}`);
 }
 
 async function fetchComment(commentId: string, env: Env): Promise<LinearComment | null> {
@@ -356,6 +377,7 @@ type LinearEvent = {
 };
 
 type LinearIssue = {
+  id: string;
   identifier: string;
   projectId?: string;
   project?: { id?: string };
