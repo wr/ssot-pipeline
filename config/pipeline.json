@@ -11,9 +11,12 @@
   "approval_emoji": "+1",
   "approval_ack_emoji": "robot_face",
   "branch_prefix": "wells/",
-  "approved_user_ids": ["95cef275-b454-485c-bd8c-4cadb6b29a08"],
+  "approved_user_ids": [
+    "95cef275-b454-485c-bd8c-4cadb6b29a08"
+  ],
   "project_to_repo": {
     "f9eb7447-31fb-4e02-b46b-7d147f2d0f55": "wr/ssot-pipeline",
-    "08a62212-7546-4dee-b7c4-0ffed3fff097": "wr/mojito"
+    "08a62212-7546-4dee-b7c4-0ffed3fff097": "wr/mojito",
+    "824aa5a0-f41d-4d70-8332-240c24df9224": "wr/enshittifier"
   }
 }
