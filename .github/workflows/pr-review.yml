@@ -108,6 +108,13 @@ jobs:
 
             Before looking at the diff, read the project's CLAUDE.md file to understand its conventions and rules.
 
+            **Check for prior review rounds.** Use `mcp__github__list_pull_request_reviews` and `mcp__github__list_pull_request_review_comments` (or `pull_request_read` with the appropriate method) to see whether `claude[bot]` has already reviewed this PR. If yes, this is a follow-up round, not a first pass — handle it accordingly:
+            - Open your review summary with `Round N follow-up — <one-line status>` where status is "previous findings addressed" / "previous findings partially addressed" / "previous findings still unresolved" / "no new changes since prior review".
+            - Drop any prior `blocking` finding whose underlying code is no longer present or has been fixed in the current diff. Do NOT re-file it.
+            - Re-flag prior `blocking` findings that remain unresolved (the same problematic code still exists at the same place) — note it's a repeat.
+            - On top of that, file genuinely NEW findings introduced by the latest commits.
+            - If nothing has changed in the diff since the prior review (rare — usually means a no-op push), say so explicitly and APPROVE without re-listing prior findings.
+
             Label every finding with exactly one severity:
             - `blocking` — must-fix: correctness bug, security issue, or explicit CLAUDE.md violation. Request changes if any exist.
             - `nit` — style or preference not documented as a required convention. Group ALL nits into one summary comment; never post nits inline.
@@ -117,7 +124,7 @@ jobs:
 
             Post `blocking` and `question` findings as inline review comments on the specific lines via the GitHub MCP. Post all nits as a single summary comment.
 
-            Approve/reject rule: use REQUEST_CHANGES only if there is at least one `blocking` finding. Otherwise APPROVE with a brief summary of what looks good and all nits grouped at the end.
+            Approve/reject rule: use REQUEST_CHANGES only if there is at least one `blocking` finding (new or still-unresolved). Otherwise APPROVE with a brief summary of what looks good and all nits grouped at the end.
           claude_args: |
             --permission-mode bypassPermissions
             --allowedTools mcp__github__* Read Grep Glob

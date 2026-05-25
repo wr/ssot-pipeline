@@ -33,11 +33,32 @@ Every workflow ends with an `if: always()` verification step that asserts the ex
 |---|---|
 | `linear-pickup` | issue state == `Plan Review` AND ≥1 comment starting with the plan marker |
 | `linear-implement` | issue state == `In Review` AND ≥1 GitHub PR attachment on the issue |
+| `linear-replan` | issue state == `Plan Review` AND a fresh plan comment was posted |
 | `pr-review` | ≥1 review submitted by `claude[bot]` on the PR |
+| `pr-fix` | ≥1 new commit by `claude[bot]` pushed to the PR branch since job start |
 
 If the assertion fails: the step posts a diagnostic comment with the trace ID, flips the issue to a `Stuck` workflow state, and exits 1 (red X). No silent successes.
 
 The `Stuck` state must exist in the Linear team workflow (type: Started). The verification step warns but doesn't crash if it's missing.
+
+## The review/fix sub-loop
+
+`pr-review` and `pr-fix` form a self-correcting loop on the PR side, separate from the Linear-dispatched main loop:
+
+```
+PR opened/sync ──▶ pr-review ──REQUEST_CHANGES──▶ pr-fix ──push fix──▶ pr-review again
+                                  │                                          │
+                                  └─APPROVE────▶ (wait for human ship-it)    └─eventually APPROVE
+```
+
+Triggers and gating:
+- `pr-review` runs on `pull_request.{opened,synchronize}`.
+- `pr-fix` runs on `pull_request_review.submitted` when `review.state == 'changes_requested'` AND the reviewer is in `fix_reviewer_logins` (default: `claude[bot]`, `wr`).
+- `pr_fix_max_attempts` (default 2) caps the loop. On the (max+1)th REQUEST_CHANGES, `pr-fix` posts a stuck comment, flips Linear to `Stuck`, and exits 0 without dispatching Claude.
+
+The fix workflow resolves the Linear issue ID by grepping the PR body for `Closes W-XX` (the trailer `linear-implement` inserts), falling back to the branch name (`wells/w-XX-slug`). Linear-side updates are skipped if neither yields an ID, but the fix still runs.
+
+No Worker changes are needed for this sub-loop — `pull_request_review` is a native GitHub event delivered straight to the target repo.
 
 ## Component map
 
@@ -57,7 +78,7 @@ Linear webhook ──HMAC verify──▶ Cloudflare Worker
                   routes by event_name / event.action
                                   │
                                   ▼
-            ssot-pipeline reusable workflow (pickup / implement / pr-review)
+    ssot-pipeline reusable workflow (pickup / implement / replan / pr-review / pr-fix)
                                   │
                                   ▼
                 claude-code-action runs claude -p with MCP

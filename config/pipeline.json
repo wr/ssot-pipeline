@@ -11,6 +11,8 @@
   "approval_emoji": "+1",
   "approval_ack_emoji": "robot_face",
   "branch_prefix": "wells/",
+  "pr_fix_max_attempts": 2,
+  "fix_reviewer_logins": ["claude[bot]", "wr"],
   "approved_user_ids": [
     "95cef275-b454-485c-bd8c-4cadb6b29a08"
   ],
