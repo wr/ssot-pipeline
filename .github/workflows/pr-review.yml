@@ -7,6 +7,10 @@ on:
         description: 'Review depth: low (fast pass, docs PRs), medium (default), high (security-sensitive or large PRs)'
         type: string
         default: 'medium'
+      trace_id:
+        description: 'Trace ID for cross-system correlation (generated if not provided)'
+        type: string
+        default: ''
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -27,7 +31,13 @@ jobs:
       EFFORT: ${{ inputs.effort || 'medium' }}
     steps:
       - name: Trace
-        run: echo "🔗 pr=#${PR} effort=${EFFORT} title='${{ github.event.pull_request.title }}'"
+        id: trace
+        run: |
+          TRACE="${{ inputs.trace_id }}"
+          [ -z "$TRACE" ] && TRACE=$(openssl rand -hex 4)
+          echo "TRACE=$TRACE" >> "$GITHUB_ENV"
+          echo "trace=$TRACE" >> "$GITHUB_OUTPUT"
+          echo "🔗 pr=#${PR} effort=${EFFORT} trace=${TRACE} title='${{ github.event.pull_request.title }}'"
 
       - uses: actions/checkout@v4
         with:
@@ -62,7 +72,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "claude,github-actions"
           prompt: |
-            Review pull request #${{ env.PR }} ("${{ github.event.pull_request.title }}").
+            Review pull request #${{ env.PR }} ("${{ github.event.pull_request.title }}") _(trace: ${{ env.TRACE }})_.
 
             Before looking at the diff, read the project's CLAUDE.md file to understand its conventions and rules.
 

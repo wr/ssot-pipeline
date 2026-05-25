@@ -2,6 +2,11 @@ name: linear-pickup (reusable)
 
 on:
   workflow_call:
+    inputs:
+      config_url:
+        description: 'Pipeline config Worker URL (override for staging)'
+        type: string
+        default: 'https://ssot-pipeline.wells-riley.workers.dev/config'
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -18,7 +23,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      CONFIG_URL: https://ssot-pipeline.wells-riley.workers.dev/config
+      CONFIG_URL: ${{ inputs.config_url }}
       TRACE: ${{ github.event.client_payload.trace_id }}
       ISSUE: ${{ github.event.client_payload.issue_id }}
     steps:
@@ -47,13 +52,13 @@ jobs:
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           PLAN_MARKER: ${{ steps.cfg.outputs.plan_marker }}
+          PLANNING_STATE: ${{ steps.cfg.outputs.planning_state }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
         run: |
           set -euo pipefail
-          # Belt-and-braces: if a prior pickup run already posted a plan for
-          # this issue, exit early. The Worker should dedupe upstream (W-88),
-          # but this protects against any regression there.
+          # Single query: UUID + plan comments + team states (combines two prior queries)
           GQL_URL=https://api.linear.app/graphql
-          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id comments{nodes{id body}}}}",variables:{id:$id}}')
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id comments{nodes{id body}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
           RESP=$(curl -sS -X POST "$GQL_URL" \
             -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
             -H "Content-Type: application/json" \
@@ -61,6 +66,13 @@ jobs:
 
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           MARKER_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
+          PLANNING_UUID=$(echo "$RESP" | jq -r --arg n "$PLANNING_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+
+          # Persist for later steps
+          echo "ISSUE_UUID=${ISSUE_UUID}" >> "$GITHUB_ENV"
+          echo "PLANNING_UUID=${PLANNING_UUID}" >> "$GITHUB_ENV"
+          echo "STUCK_UUID=${STUCK_UUID}" >> "$GITHUB_ENV"
 
           echo "trace=${TRACE} idempotency check: plan_comments=$MARKER_COUNT"
 
@@ -68,8 +80,6 @@ jobs:
             echo "::notice::Plan already posted for $ISSUE — skipping duplicate dispatch (trace=${TRACE})"
             echo "## Duplicate dispatch skipped" >> "$GITHUB_STEP_SUMMARY"
             echo "Issue $ISSUE already has $MARKER_COUNT plan comment(s). Exiting without invoking Claude." >> "$GITHUB_STEP_SUMMARY"
-            # No Linear comment — Worker dedupes upstream and a duplicate here isn't
-            # actionable for the user. Workflow log + step summary are enough for debugging.
             echo "ALREADY_PLANNED=1" >> "$GITHUB_ENV"
           fi
 
@@ -77,27 +87,20 @@ jobs:
         if: env.ALREADY_PLANNED != '1'
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
-          PLANNING_STATE: ${{ steps.cfg.outputs.planning_state }}
         run: |
           set -euo pipefail
-          GQL_URL=https://api.linear.app/graphql
-          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
-          CT="Content-Type: application/json"
-
-          # Resolve issue UUID + Planning state UUID
-          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
-          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
-          PLANNING_UUID=$(echo "$RESP" | jq -r --arg n "$PLANNING_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
-
-          if [ -z "$PLANNING_UUID" ] || [ "$PLANNING_UUID" = "null" ]; then
-            echo "::warning::Planning state '$PLANNING_STATE' not found in team — skipping early flip"
+          # ISSUE_UUID and PLANNING_UUID resolved in prior step — no extra GQL query needed
+          if [ -z "${PLANNING_UUID:-}" ] || [ "$PLANNING_UUID" = "null" ]; then
+            echo "::warning::Planning state not found in team — skipping early flip"
             exit 0
           fi
 
-          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+          GQL_URL=https://api.linear.app/graphql
+          curl -sS -X POST "$GQL_URL" \
+            -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+            -H "Content-Type: application/json" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$PLANNING_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
-          echo "trace=${TRACE} flipped $ISSUE to $PLANNING_STATE"
+          echo "trace=${TRACE} flipped $ISSUE to Planning"
 
       - name: Write MCP config
         if: env.ALREADY_PLANNED != '1'
@@ -132,7 +135,11 @@ jobs:
             Steps:
             1. Fetch the issue with mcp__linear__get_issue.
             2. Read this repo's CLAUDE.md and any relevant code to understand context. Don't write code in this step.
-            3. Write a clear, actionable plan with: Context, Approach, Files to change, Verification.
+            3. Write a clear, actionable plan with exactly four `##`-level sections:
+               - `## Context` — background and why this issue matters
+               - `## Approach` — how you'll solve it and key decisions
+               - `## Files to change` — a Markdown checklist (`- [ ]`) listing every file and the specific change
+               - `## Verification` — how to confirm the implementation is correct
             4. Post the plan as a top-level comment on the issue via mcp__linear__save_comment. The comment body MUST:
                - Start with this exact first line (it's both the visible header and the marker the Worker greps for):
 
@@ -159,14 +166,10 @@ jobs:
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
         run: |
           set -euo pipefail
-          # Skip verification if the prior step didn't even run (no config etc.)
           if [ -z "${EXPECT_STATE:-}" ]; then
             echo "::warning::No config available, skipping verification"
             exit 0
           fi
-
-          # Skip verification if we deliberately short-circuited (plan already
-          # existed for this issue — see the "Skip if plan already posted" step).
           if [ "${ALREADY_PLANNED:-}" = "1" ]; then
             echo "✓ verification skipped — duplicate dispatch was deliberately short-circuited"
             exit 0
@@ -176,13 +179,14 @@ jobs:
           AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
           CT="Content-Type: application/json"
 
-          # Query issue state + comment bodies
-          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} comments{nodes{body}}}}",variables:{id:$id}}')
+          # Single query: state + comments + team states (eliminates the conditional second query)
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} comments{nodes{body}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
 
           STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           MARKER_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
+          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
           echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE plan_comments=$MARKER_COUNT"
 
@@ -193,17 +197,11 @@ jobs:
 
           echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$MARKER_COUNT"
 
-          # Resolve Stuck state UUID
-          STATES=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg uuid "$ISSUE_UUID" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$uuid}}')")
-          STUCK_UUID=$(echo "$STATES" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
-
-          # Post a diagnostic comment
-          BODY="❌ **Pickup failed verification** — _(trace: ${TRACE})_\n\nClaude finished without leaving the issue in the expected state.\n\n- Expected state: \`${EXPECT_STATE}\`\n- Actual state: \`${STATE}\`\n- Plan comments found: ${MARKER_COUNT}\n\n[Workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          BODY=$(printf '❌ **Pickup failed verification** — _(trace: %s)_\n\nClaude finished without leaving the issue in the expected state.\n\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments found: %d\n\n[Workflow run](%s/%s/actions/runs/%s)' \
+            "$TRACE" "$EXPECT_STATE" "$STATE" "$MARKER_COUNT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 
-          # Flip to Stuck if state exists
           if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
             curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
               -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
