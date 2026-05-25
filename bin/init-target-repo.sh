@@ -17,7 +17,8 @@
 #      working trees and in sync with origin. Aborts otherwise.
 #   3. Installs templates/ssot.yml into <repo>/.github/workflows/ssot.yml
 #   4. Adds a `## Source of truth` block to <repo>/CLAUDE.md (creates if missing)
-#   5. Sets repo secrets CLAUDE_CODE_OAUTH_TOKEN + LINEAR_APP_TOKEN
+#   5. Sets repo secrets CLAUDE_CODE_OAUTH_TOKEN + LINEAR_APP_TOKEN +
+#      CLAUDE_REVIEWER_APP_ID + CLAUDE_REVIEWER_APP_KEY
 #   6. Commits + pushes the target repo's stub + CLAUDE.md changes
 #   7. Adds the project_to_repo mapping in this repo's config/pipeline.json,
 #      commits, and pushes to main (which triggers deploy-worker to redeploy
@@ -29,12 +30,18 @@
 # Prerequisites:
 #   - gh CLI authenticated
 #   - jq installed
-#   - CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and LINEAR_APP_TOKEN
-#     available via env, macOS Keychain, or interactive prompt.
+#   - CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), LINEAR_APP_TOKEN,
+#     CLAUDE_REVIEWER_APP_ID, and CLAUDE_REVIEWER_APP_KEY available via env,
+#     macOS Keychain, or interactive prompt.
 #     Keychain seed (one-time, recommended):
 #       security add-generic-password -s ssot-pipeline -a LINEAR_APP_TOKEN -w '<token>'
 #       security add-generic-password -s ssot-pipeline -a CLAUDE_CODE_OAUTH_TOKEN -w '<token>'
+#       security add-generic-password -s ssot-pipeline -a CLAUDE_REVIEWER_APP_ID -w '<app-id>'
+#       security add-generic-password -s ssot-pipeline -a CLAUDE_REVIEWER_APP_KEY \
+#         -w "$(cat /path/to/wr-claude-reviewer.private-key.pem)"
 #     (Add `-U` to overwrite an existing entry.)
+#   - The `wr-claude-reviewer` GitHub App must be installed on the target repo
+#     before the first pr-review run. See docs/github-app-setup.md.
 
 set -euo pipefail
 
@@ -45,13 +52,30 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Resolve a credential by name in order: env var → macOS Keychain → prompt.
 # Keychain entries live under service "ssot-pipeline", account = $NAME.
 # Seed once: security add-generic-password -s ssot-pipeline -a $NAME -w '<token>'
-# (use -U to overwrite an existing entry).
+# (use -U to overwrite an existing entry). Multi-line secrets (e.g. PEM keys)
+# also work; pipe through:
+#   security add-generic-password -U -s ssot-pipeline -a $NAME \
+#     -w "$(cat /path/to/key.pem)"
+# `security -w` returns multi-line/binary values as a hex string with no
+# separator; we detect that and decode below so callers always get raw bytes.
 load_secret() {
   local name="$1"
   local value="${!name:-}"
   if [ -z "$value" ] && command -v security >/dev/null 2>&1; then
     value=$(security find-generic-password -w -s ssot-pipeline -a "$name" 2>/dev/null || true)
     [ -n "$value" ] && echo "→ Loaded $name from Keychain" >&2
+    # Pure-hex, even-length output is `security`'s rendering of a value
+    # containing non-printable bytes (e.g. newlines in a PEM). Decode it.
+    # Single-line ASCII passwords never trigger this branch.
+    if [ -n "$value" ] && [[ "$value" =~ ^[0-9a-f]+$ ]] && [ $((${#value} % 2)) -eq 0 ] && [ "${#value}" -gt 32 ]; then
+      local decoded
+      decoded=$(printf '%s' "$value" | xxd -r -p 2>/dev/null || true)
+      # Only swap if decoded contains a newline — pure-hex *real* passwords
+      # (sha256 hex strings, etc.) would decode to gibberish without one.
+      if [ -n "$decoded" ] && [[ "$decoded" == *$'\n'* ]]; then
+        value="$decoded"
+      fi
+    fi
   fi
   if [ -z "$value" ]; then
     echo -n "$name: " >&2
@@ -247,6 +271,8 @@ set_secret() {
 
 set_secret CLAUDE_CODE_OAUTH_TOKEN
 set_secret LINEAR_APP_TOKEN
+set_secret CLAUDE_REVIEWER_APP_ID
+set_secret CLAUDE_REVIEWER_APP_KEY
 
 # --- Install stub workflow in target repo ---
 mkdir -p .github/workflows
@@ -331,7 +357,7 @@ cat <<EOF
 Done:
   • Installed .github/workflows/ssot.yml in $REPO_FULL
   • Added Source of truth block to $REPO_FULL/CLAUDE.md
-  • Set repo secrets: CLAUDE_CODE_OAUTH_TOKEN, LINEAR_APP_TOKEN
+  • Set repo secrets: CLAUDE_CODE_OAUTH_TOKEN, LINEAR_APP_TOKEN, CLAUDE_REVIEWER_APP_ID, CLAUDE_REVIEWER_APP_KEY
   • Pushed to $REPO_FULL ($TARGET_DEFAULT_BRANCH)
   • Pushed project_to_repo mapping to wr/ssot-pipeline (main) — deploy-worker is redeploying now
 

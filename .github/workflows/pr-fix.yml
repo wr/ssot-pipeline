@@ -88,8 +88,8 @@ jobs:
           # on the very first REQUEST_CHANGES has count=1. We allow up to MAX
           # fix runs, so we bail when count > MAX (i.e. the (MAX+1)th request).
           COUNT=$(gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
-            --jq '[.[] | select(.user.login=="claude[bot]" and .state=="CHANGES_REQUESTED")] | length')
-          echo "claude[bot] REQUEST_CHANGES count on PR #${PR}: $COUNT (max=$MAX)"
+            --jq '[.[] | select(.user.login=="wr-claude-reviewer[bot]" and .state=="CHANGES_REQUESTED")] | length')
+          echo "wr-claude-reviewer[bot] REQUEST_CHANGES count on PR #${PR}: $COUNT (max=$MAX)"
           if [ "$COUNT" -gt "$MAX" ]; then
             echo "exceeded=true" >> "$GITHUB_OUTPUT"
           else
@@ -142,7 +142,7 @@ jobs:
           MAX: ${{ steps.cfg.outputs.max_attempts }}
         run: |
           set -euo pipefail
-          BODY=$(printf '🛑 **Auto-fix cap reached** — claude[bot] has requested changes %s times (max %s). Not dispatching another fix. Human intervention needed. _(trace: %s)_' "$COUNT" "$MAX" "$TRACE")
+          BODY=$(printf '🛑 **Auto-fix cap reached** — wr-claude-reviewer[bot] has requested changes %s times (max %s). Not dispatching another fix. Human intervention needed. _(trace: %s)_' "$COUNT" "$MAX" "$TRACE")
           gh pr comment "$PR" --repo "$REPO" --body "$BODY"
 
           if [ -z "${ISSUE:-}" ]; then
@@ -159,7 +159,7 @@ jobs:
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
-          LINEAR_BODY=$(printf '🛑 **Auto-fix cap reached on PR #%s** — claude[bot] has requested changes %s times (max %s). Not dispatching another fix. _(trace: %s)_' "$PR" "$COUNT" "$MAX" "$TRACE")
+          LINEAR_BODY=$(printf '🛑 **Auto-fix cap reached on PR #%s** — wr-claude-reviewer[bot] has requested changes %s times (max %s). Not dispatching another fix. _(trace: %s)_' "$PR" "$COUNT" "$MAX" "$TRACE")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 
