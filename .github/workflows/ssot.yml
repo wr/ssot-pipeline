@@ -34,7 +34,7 @@
 # Required Linear setup:
 #   - Issue state "Plan Review" must exist in the Personal team
 #   - "claude" Linear OAuth app webhook must point at the Worker, scoped to this project
-#   - The Worker's LINEAR_PROJECT_TO_REPO mapping must include this repo
+#   - The Worker's `project_to_repo` mapping in config/pipeline.json must include this repo
 
 name: ssot
 

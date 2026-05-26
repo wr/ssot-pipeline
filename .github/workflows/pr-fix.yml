@@ -7,10 +7,6 @@ on:
         description: 'Pipeline config Worker URL — set SSOT_WORKER_URL as a GitHub Actions variable on the target repo'
         type: string
         default: ''
-      trace_id:
-        description: 'Trace ID for cross-system correlation (generated if not provided)'
-        type: string
-        default: ''
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -42,9 +38,11 @@ jobs:
     steps:
       - name: Trace
         id: trace
+        # PR-side workflows mint their own trace ID — they're triggered by
+        # pull_request_review events from GitHub, not repository_dispatch from
+        # the Worker, so there's no upstream trace to propagate.
         run: |
-          TRACE="${{ inputs.trace_id }}"
-          [ -z "$TRACE" ] && TRACE=$(openssl rand -hex 4)
+          TRACE=$(openssl rand -hex 4)
           echo "TRACE=$TRACE" >> "$GITHUB_ENV"
           echo "🔗 pr=#${PR} reviewer=${REVIEWER} trace=${TRACE}"
 
