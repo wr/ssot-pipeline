@@ -241,6 +241,11 @@ jobs:
 
             Approve/reject rule: use REQUEST_CHANGES only if there is at least one `blocking` finding (new or still-unresolved). Otherwise APPROVE with a brief summary of what looks good and all nits grouped at the end.
 
+            **How to actually submit the review (this is the only path that works — `gh api -X POST` is intentionally denied for safety):**
+            1. If you have inline findings, call `mcp__github__pull_request_review_write` to create a pending review, attach each inline finding via `mcp__github__add_comment_to_pending_review`, then call `mcp__github__pull_request_review_write` again to submit the pending review with the APPROVE / REQUEST_CHANGES verdict and your summary body.
+            2. If you have no inline findings (clean APPROVE with just a summary), call `mcp__github__pull_request_review_write` once to create and submit the review in one step.
+            The job's verify step will fail if no review is posted by `${{ steps.cfg.outputs.review_bot_login }}`, even if your analysis was sound — submission is part of the task, not optional.
+
             --- per-request context (variable; below this line changes every run) ---
 
             Review pull request #${{ env.PR }} _(trace: ${{ env.TRACE }})_.
