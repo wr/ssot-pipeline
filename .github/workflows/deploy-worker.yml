@@ -41,6 +41,10 @@ jobs:
 
   deploy:
     needs: test
+    # cancel-in-progress=false: never cancel a deploy mid-`wrangler deploy` —
+    # partial deploys can leave the Worker in a broken state. Queued deploys
+    # for newer commits serialize behind and run after the current one
+    # finishes, so the latest main always ends up live.
     concurrency:
       group: deploy-worker
       cancel-in-progress: false

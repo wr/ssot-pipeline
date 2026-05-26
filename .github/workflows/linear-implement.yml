@@ -24,6 +24,10 @@ on:
 
 jobs:
   implement:
+    # cancel-in-progress=false: an in-flight implement may have already opened
+    # the PR, pushed commits, or flipped Linear state — cancelling mid-run
+    # leaves partial work and orphaned branches. Duplicate dispatches serialize
+    # behind; the verify step's idempotency checks handle the redundancy.
     concurrency:
       group: linear-implement-${{ github.event.client_payload.issue_id }}
       cancel-in-progress: false

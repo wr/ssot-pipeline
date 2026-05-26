@@ -15,6 +15,10 @@ on:
 
 jobs:
   replan:
+    # cancel-in-progress=true: the newest replan request supersedes any older
+    # in-flight replan — the user's most recent feedback is what matters. Safe
+    # to cancel because replan only posts a new plan comment and flips state;
+    # nothing destructive is in-flight to lose.
     concurrency:
       group: linear-replan-${{ github.event.client_payload.issue_id }}
       cancel-in-progress: true

@@ -25,6 +25,10 @@ on:
 
 jobs:
   review:
+    # cancel-in-progress=true: a new push to the PR makes the older review
+    # obsolete — reviewing the latest commits is what matters. Safe to cancel
+    # because the review only posts comments/verdicts; no commits or state
+    # transitions are in-flight to lose.
     concurrency:
       group: pr-review-${{ github.event.pull_request.number }}
       cancel-in-progress: true
