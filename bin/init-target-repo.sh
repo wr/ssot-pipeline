@@ -16,11 +16,13 @@
 #   2. Pre-flight: both repos must be on their default branch with clean
 #      working trees and in sync with origin. Aborts otherwise.
 #   3. Installs templates/ssot.yml into <repo>/.github/workflows/ssot.yml
-#   4. Adds a `## Source of truth` block to <repo>/CLAUDE.md (creates if missing)
-#   5. Sets repo secrets CLAUDE_CODE_OAUTH_TOKEN + LINEAR_APP_TOKEN +
+#   4. Installs templates/claude.yml into <repo>/.github/workflows/claude.yml
+#      (the @claude mention handler)
+#   5. Adds a `## Source of truth` block to <repo>/CLAUDE.md (creates if missing)
+#   6. Sets repo secrets CLAUDE_CODE_OAUTH_TOKEN + LINEAR_APP_TOKEN +
 #      CLAUDE_REVIEWER_APP_ID + CLAUDE_REVIEWER_APP_KEY
-#   6. Commits + pushes the target repo's stub + CLAUDE.md changes
-#   7. Adds the project_to_repo mapping in this repo's config/pipeline.json,
+#   7. Commits + pushes the target repo's stub + CLAUDE.md changes
+#   8. Adds the project_to_repo mapping in this repo's config/pipeline.json,
 #      commits, and pushes to main (which triggers deploy-worker to redeploy
 #      the Worker automatically)
 #
@@ -235,8 +237,8 @@ if [ "$TARGET_BRANCH" != "$TARGET_DEFAULT_BRANCH" ]; then
   echo "Error: $TARGET_REPO_PATH is on '$TARGET_BRANCH', expected '$TARGET_DEFAULT_BRANCH'. Switch first." >&2
   exit 1
 fi
-if [ -n "$(git status --porcelain .github/workflows/ssot.yml CLAUDE.md 2>/dev/null)" ]; then
-  echo "Error: $TARGET_REPO_PATH has uncommitted changes to .github/workflows/ssot.yml or CLAUDE.md. Commit or stash first." >&2
+if [ -n "$(git status --porcelain .github/workflows/ssot.yml .github/workflows/claude.yml CLAUDE.md 2>/dev/null)" ]; then
+  echo "Error: $TARGET_REPO_PATH has uncommitted changes to .github/workflows/ssot.yml, .github/workflows/claude.yml, or CLAUDE.md. Commit or stash first." >&2
   exit 1
 fi
 git fetch origin "$TARGET_DEFAULT_BRANCH" --quiet
@@ -321,6 +323,8 @@ echo "→ Set variable SSOT_WORKER_URL on $REPO_FULL"
 mkdir -p .github/workflows
 sed "s|__SSOT_REPO__|$SSOT_REPO|g" "$REPO_ROOT/templates/ssot.yml" > .github/workflows/ssot.yml
 echo "→ Installed .github/workflows/ssot.yml (uses: $SSOT_REPO)"
+cp "$REPO_ROOT/templates/claude.yml" .github/workflows/claude.yml
+echo "→ Installed .github/workflows/claude.yml (@claude mention handler)"
 
 # --- Update CLAUDE.md in target repo ---
 BRANCH_PREFIX=$(jq -r '.branch_prefix // ""' "$REPO_ROOT/config/pipeline.json")
@@ -352,8 +356,8 @@ else
 fi
 
 # --- Commit + push target repo (if there's anything to commit) ---
-if [ -n "$(git status --porcelain .github/workflows/ssot.yml CLAUDE.md 2>/dev/null)" ]; then
-  git add .github/workflows/ssot.yml CLAUDE.md
+if [ -n "$(git status --porcelain .github/workflows/ssot.yml .github/workflows/claude.yml CLAUDE.md 2>/dev/null)" ]; then
+  git add .github/workflows/ssot.yml .github/workflows/claude.yml CLAUDE.md
   git commit -m "Wire up ssot-pipeline loop
 
 Adds .github/workflows/ssot.yml stub that consumes the four reusable
@@ -404,6 +408,7 @@ cat <<EOF
 
 Done:
   • Installed .github/workflows/ssot.yml in $REPO_FULL
+  • Installed .github/workflows/claude.yml in $REPO_FULL (@claude mention handler)
   • Added Source of truth block to $REPO_FULL/CLAUDE.md
   • Set repo secrets: CLAUDE_CODE_OAUTH_TOKEN, LINEAR_APP_TOKEN, CLAUDE_REVIEWER_APP_ID, CLAUDE_REVIEWER_APP_KEY
   • Pushed to $REPO_FULL ($TARGET_DEFAULT_BRANCH)
