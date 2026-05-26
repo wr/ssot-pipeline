@@ -1,0 +1,29 @@
+# CODEOWNERS — review gate for sensitive surfaces.
+#
+# Why: changes to these paths can flip project routing, the approved-users
+# list, dispatch logic, or the workflows that run with secrets. A single
+# unguarded approval would be enough to compromise the loop end-to-end.
+# Requiring @wells review here turns those into deliberate decisions.
+#
+# Syntax: https://docs.github.com/en/repositories/managing-your-repositories-settings-and-customization/customizing-your-repository/about-code-owners
+# Effect requires branch protection on `main` with "Require review from Code
+# Owners" enabled — see docs/security.md.
+
+# Pipeline config (project_to_repo routing, approved user IDs, state names).
+/config/pipeline.json           @wells
+
+# Cloudflare Worker source (HMAC verification, dispatch logic, /config endpoint).
+/worker/                        @wells
+
+# Reusable workflows + the target-repo stub template.
+/.github/workflows/             @wells
+/templates/                     @wells
+
+# Setup script that writes secrets into target repos.
+/bin/init-target-repo.sh        @wells
+
+# Security runbook itself.
+/docs/security.md               @wells
+
+# Self-protect: don't let the guard be silently widened.
+/.github/CODEOWNERS             @wells
