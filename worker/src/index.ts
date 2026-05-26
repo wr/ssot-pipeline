@@ -8,6 +8,13 @@ export interface Env {
 
 const CONFIG_JSON = JSON.stringify(config);
 
+// Webhook freshness window. HMAC verifies *who* signed the payload but says
+// nothing about *when* — so a captured signed payload would be replayable
+// forever. Require the Linear-Delivery-Timestamp header to be within ±5min
+// of wall-clock, matching Stripe's industry-standard tolerance. The same
+// window applies to clock skew in either direction.
+const WEBHOOK_FRESHNESS_MS = 5 * 60 * 1000;
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -39,6 +46,24 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
 
   if (!(await verifySignature(body, signature, env.LINEAR_WEBHOOK_SECRET))) {
     return new Response("invalid signature", { status: 401 });
+  }
+
+  // Freshness check — after HMAC succeeds, reject replays. Missing header is
+  // a hard reject so attackers can't simply strip the header to opt out.
+  const tsHeader = req.headers.get("Linear-Delivery-Timestamp");
+  if (!tsHeader) {
+    console.warn("rejecting webhook: missing Linear-Delivery-Timestamp header");
+    return new Response("missing timestamp", { status: 401 });
+  }
+  const ts = parseInt(tsHeader, 10);
+  if (!Number.isFinite(ts)) {
+    console.warn(`rejecting webhook: malformed Linear-Delivery-Timestamp=${tsHeader}`);
+    return new Response("invalid timestamp", { status: 401 });
+  }
+  const skew = Math.abs(Date.now() - ts);
+  if (skew > WEBHOOK_FRESHNESS_MS) {
+    console.warn(`rejecting webhook: timestamp skew ${skew}ms exceeds ${WEBHOOK_FRESHNESS_MS}ms (header=${tsHeader})`);
+    return new Response("stale timestamp", { status: 401 });
   }
 
   let event: LinearEvent;
