@@ -263,6 +263,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
+        id: claude
         env:
           MAX_THINKING_TOKENS: '10000'
         with:
@@ -306,11 +307,20 @@ jobs:
             If after analyzing the review you determine **no fix is actually needed** (e.g. the blocking findings are already addressed in the latest commits, are based on a misreading of the diff, or are not applicable): post a comment on the PR whose body contains the exact HTML-comment marker `<!-- pr-fix-no-fix-needed -->` on its own (you may include human-readable explanation around it). Then stop without pushing any commits. The marker is what tells the verification step this was a deliberate no-op, not a failure. ${{ env.ISSUE && format('Also post a Linear comment on {0} with the same explanation (no need for the marker there).', env.ISSUE) || '' }}
 
             If you genuinely cannot fix something (ambiguous review, conflicting requests, tests fail): post a comment on the PR explaining why (do NOT include the no-fix-needed marker — this is a failure, not a no-op), ${{ env.ISSUE && format('post a Linear comment on {0} with the same explanation,', env.ISSUE) || '' }} and stop without pushing. Don't push broken code.
+
+            As your FINAL output (after all tool calls), return a JSON object matching this schema:
+            {
+              "action_taken": "fixed" | "no_fix_needed" | "unable_to_fix",
+              "reason": string,           // one-sentence explanation (max ~300 chars)
+              "commits_pushed": number    // count of new commits you pushed (0 for no_fix_needed / unable_to_fix)
+            }
+            This structured output is the PRIMARY signal the verify step uses to decide pass/fail. The W-148 `<!-- pr-fix-no-fix-needed -->` HTML marker is kept as a fallback — you should still post it in the no-fix-needed comment as a belt-and-suspenders for human readability, but the JSON is what the workflow trusts.
           claude_args: |
             --permission-mode bypassPermissions
             --mcp-config /tmp/mcp.json
             --max-turns 30
             --model claude-sonnet-4-6
+            --json-schema '{"type":"object","additionalProperties":false,"required":["action_taken","reason","commits_pushed"],"properties":{"action_taken":{"type":"string","enum":["fixed","no_fix_needed","unable_to_fix"]},"reason":{"type":"string","maxLength":600},"commits_pushed":{"type":"integer","minimum":0}}}'
             --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "mcp__linear__create_attachment" "mcp__github__get_pull_request" "mcp__github__pull_request_read" "mcp__github__list_pull_requests" "mcp__github__add_comment_to_pending_review" "mcp__github__add_reply_to_pull_request_comment" "Bash" "Read" "Write" "Edit" "Grep" "Glob"
             --disallowedTools "Bash(rm *)" "Bash(rm:*)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push --force*)" "Bash(git push -f*)" "Bash(git push --force-with-lease*)" "Bash(git push --mirror*)" "Bash(git push --delete*)" "Bash(git push *:*)" "Bash(git push * --delete*)" "Bash(git remote add *)" "Bash(git remote set-url *)" "Bash(git reset --hard origin/main*)" "Bash(git update-ref -d *)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh repo transfer*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh api -X DELETE*)" "Bash(gh api --method DELETE*)" "Bash(gh auth*)" "Bash(gh ssh-key*)" "Bash(gh gpg-key*)" "WebFetch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
 
@@ -323,6 +333,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
         run: |
           set -euo pipefail
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -333,7 +344,23 @@ jobs:
           # masquerading as a successful fix. Empty range → empty author list.
           NEW_AUTHORS=$(git log --format='%ae' "${BEFORE_SHA}..origin/${{ github.event.pull_request.head.ref }}" || true)
           NON_BOT_AUTHORS=$(echo "$NEW_AUTHORS" | grep -v '^$' | grep -v 'claude\[bot\]@users\.noreply\.github\.com' || true)
-          echo "trace=${TRACE} verify: new commits since ${BEFORE_SHA}: $NEW_COMMITS"
+
+          # Parse structured_output (primary signal). Falls through to legacy
+          # marker scan if absent / unparseable / empty.
+          SO_ACTION=""
+          SO_REASON=""
+          SO_COMMITS=""
+          if [ -n "${STRUCTURED_OUTPUT:-}" ] && echo "$STRUCTURED_OUTPUT" | jq -e . >/dev/null 2>&1; then
+            SO_ACTION=$(echo "$STRUCTURED_OUTPUT" | jq -r '.action_taken // empty')
+            SO_REASON=$(echo "$STRUCTURED_OUTPUT" | jq -r '.reason // empty')
+            SO_COMMITS=$(echo "$STRUCTURED_OUTPUT" | jq -r '.commits_pushed // empty')
+            echo "structured_output: action_taken=$SO_ACTION commits_pushed=$SO_COMMITS"
+            echo "reason: $SO_REASON"
+          else
+            echo "structured_output not present — falling back to marker grep"
+          fi
+
+          echo "trace=${TRACE} verify: new commits since ${BEFORE_SHA}: $NEW_COMMITS, structured(action=$SO_ACTION commits=$SO_COMMITS)"
 
           if [ "$NEW_COMMITS" -gt 0 ] && [ -z "$NON_BOT_AUTHORS" ]; then
             echo "✓ verification passed (claude[bot] pushed $NEW_COMMITS commit(s))"
@@ -345,18 +372,30 @@ jobs:
             PR_BODY=$(printf '❌ **Auto-fix failed verification** — new commits pushed but not all authored by `claude[bot]`. [Workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
             gh pr comment "$PR" --repo "$REPO" --body "$PR_BODY" || true
           else
-            # Zero new commits. Check for the explicit "no fix needed" marker
-            # posted by Claude — that's a deliberate, successful no-op, not a
-            # failure. Without this check, every "review was wrong / already
-            # addressed" outcome flips the issue to Stuck.
-            MARKER='<!-- pr-fix-no-fix-needed -->'
-            # Look for the marker in any PR issue-comment authored by claude[bot]
-            # (the fix actor, NOT the review bot). Marker only appears when this
-            # run posts it, so scanning all comments is safe.
-            MARKER_HIT=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
-              | jq --arg m "$MARKER" '[.[] | select(.user.login == "claude[bot]" and (.body | contains($m)))] | length')
-            if [ "${MARKER_HIT:-0}" -gt 0 ]; then
-              echo "✓ verification passed (no-fix-needed marker present from claude[bot])"
+            # Zero new commits. Two signals say "deliberate no-op, not failure":
+            #   1. structured_output.action_taken == "no_fix_needed" (PRIMARY — JSON-validated)
+            #   2. legacy `<!-- pr-fix-no-fix-needed -->` HTML marker in a PR comment (FALLBACK from W-148)
+            # We treat either as success. Structured output is preferred because
+            # it's type-checked by the action; the marker stays for backward
+            # compatibility and for humans skimming PR comments.
+            NO_FIX_NEEDED=0
+            if [ "$SO_ACTION" = "no_fix_needed" ]; then
+              echo "✓ verification passed (structured_output.action_taken=no_fix_needed)"
+              NO_FIX_NEEDED=1
+            else
+              MARKER='<!-- pr-fix-no-fix-needed -->'
+              # Look for the marker in any PR issue-comment authored by claude[bot]
+              # (the fix actor, NOT the review bot). Marker only appears when this
+              # run posts it, so scanning all comments is safe.
+              MARKER_HIT=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+                | jq --arg m "$MARKER" '[.[] | select(.user.login == "claude[bot]" and (.body | contains($m)))] | length')
+              if [ "${MARKER_HIT:-0}" -gt 0 ]; then
+                echo "✓ verification passed (no-fix-needed marker fallback — structured_output was empty/missing)"
+                NO_FIX_NEEDED=1
+              fi
+            fi
+
+            if [ "$NO_FIX_NEEDED" = "1" ]; then
               # Flip Linear back to In Review since no fix was actually applied —
               # the PR is still in whatever state it was before the review.
               if [ -n "${ISSUE_UUID:-}" ]; then
@@ -370,15 +409,15 @@ jobs:
                 if [ -n "$IR_UUID" ] && [ "$IR_UUID" != "null" ]; then
                   curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
                     -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$IR_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
-                  LB=$(printf '🟢 Auto-fix on PR #%s determined no fix was needed (marker present). Returned issue to %s. [Workflow run](%s) _(trace: %s)_' "$PR" "$IN_REVIEW_STATE" "$RUN_URL" "$TRACE")
+                  LB=$(printf '🟢 Auto-fix on PR #%s determined no fix was needed. Returned issue to %s. [Workflow run](%s) _(trace: %s)_' "$PR" "$IN_REVIEW_STATE" "$RUN_URL" "$TRACE")
                   curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
                     -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LB" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
                 fi
               fi
               exit 0
             fi
-            echo "::error::Verification failed — no new commits and no no-fix-needed marker on PR #$PR"
-            PR_BODY=$(printf '❌ **Auto-fix failed verification** — Claude finished without pushing any new commits and without posting the `<!-- pr-fix-no-fix-needed -->` marker. [Workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
+            echo "::error::Verification failed — no new commits, structured_output.action_taken='$SO_ACTION' (expected 'no_fix_needed' or 'fixed'), and no no-fix-needed marker on PR #$PR"
+            PR_BODY=$(printf '❌ **Auto-fix failed verification** — Claude finished without pushing any new commits. structured_output.action_taken=`%s`, no `<!-- pr-fix-no-fix-needed -->` marker found. [Workflow run](%s) _(trace: %s)_' "${SO_ACTION:-<empty>}" "$RUN_URL" "$TRACE")
             gh pr comment "$PR" --repo "$REPO" --body "$PR_BODY" || true
           fi
 
