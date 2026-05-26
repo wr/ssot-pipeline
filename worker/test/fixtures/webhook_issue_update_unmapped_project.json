@@ -1,0 +1,15 @@
+{
+  "type": "Issue",
+  "action": "update",
+  "actorId": "95cef275-b454-485c-bd8c-4cadb6b29a08",
+  "updatedFrom": {
+    "stateId": "old-state-id"
+  },
+  "data": {
+    "id": "issue-uuid-4",
+    "identifier": "X-1",
+    "projectId": "00000000-0000-0000-0000-000000000000",
+    "project": { "id": "00000000-0000-0000-0000-000000000000" },
+    "state": { "name": "Todo (AI)" }
+  }
+}
