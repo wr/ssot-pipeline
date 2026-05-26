@@ -12,6 +12,15 @@ on:
         required: true
       LINEAR_APP_TOKEN:
         required: true
+      # Optional: PAT (or App-installation token) with `Actions: write` on this
+      # repo. When present, the verify step can fire `linear-replan` via
+      # repository_dispatch for ablatable failure shapes (head-ref mismatch,
+      # missing Closes trailer, state mismatch, no PR attached) instead of
+      # flipping straight to Stuck. GITHUB_TOKEN cannot trigger another
+      # workflow via repository_dispatch — that's why this needs to be its own
+      # secret. If unset, auto-replan is skipped and Stuck is the only path.
+      GITHUB_DISPATCH_TOKEN:
+        required: false
 
 jobs:
   implement:
@@ -192,10 +201,18 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           EXPECT_STATE: ${{ steps.cfg.outputs.in_review_state }}
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
           BRANCH_PREFIX: ${{ steps.cfg.outputs.branch_prefix }}
+          # Auto-replan cap: max total automated retries we'll dispatch for one
+          # issue across runs. Counted by scanning prior Stuck-context comments
+          # on the issue (magic prefix `## 🚨 Stuck context — trace`). If a
+          # human moves the issue back to Todo (AI) they re-enter the loop with
+          # the prior context in view — that's the SLO. The auto-replan cap
+          # only governs hands-off self-healing inside a single human cycle.
+          AUTO_REPLAN_MAX: 2
         run: |
           set -euo pipefail
           if [ -z "${EXPECT_STATE:-}" ]; then
@@ -207,8 +224,9 @@ jobs:
           AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
           CT="Content-Type: application/json"
 
-          # Single query: state + attachments + team states (eliminates the conditional second query)
-          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} attachments{nodes{url}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
+          # Single query: state + attachments + comments + team states. Comments
+          # are pulled so we can count prior auto-replan attempts for the cap.
+          QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} attachments{nodes{url}} comments{nodes{body}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
 
           STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
@@ -216,15 +234,27 @@ jobs:
           PR_URLS=$(echo "$RESP" | jq -r '[.data.issue.attachments.nodes[] | select(.url | contains("github.com") and contains("/pull/")) | .url] | .[]')
           PR_COUNT=$(echo "$PR_URLS" | grep -c . || true)
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+          # Count prior Stuck-context comments — each one represents a previous
+          # verify failure on this issue. Used to enforce AUTO_REPLAN_MAX so we
+          # never loop indefinitely.
+          PRIOR_STUCK_COUNT=$(echo "$RESP" | jq '[.data.issue.comments.nodes[] | select(.body | startswith("## 🚨 Stuck context — trace"))] | length')
 
-          echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE pr_attachments=$PR_COUNT"
+          echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE pr_attachments=$PR_COUNT prior_stuck_ctx=$PRIOR_STUCK_COUNT"
 
           FAIL_REASONS=""
+          # FAIL_SHAPES is a space-separated list of mechanically-recognizable
+          # failure tags. If every failure has a known shape, we treat the run
+          # as ablatable and dispatch linear-replan (subject to AUTO_REPLAN_MAX
+          # and GITHUB_DISPATCH_TOKEN availability). Any unrecognized failure
+          # leaves FAIL_SHAPES with an "unknown" entry and forces Stuck.
+          FAIL_SHAPES=""
           if [ "$STATE" != "$EXPECT_STATE" ]; then
             FAIL_REASONS="${FAIL_REASONS}\n- State is \`$STATE\` (expected \`$EXPECT_STATE\`)"
+            FAIL_SHAPES="${FAIL_SHAPES} state_mismatch"
           fi
           if [ "$PR_COUNT" -eq 0 ]; then
             FAIL_REASONS="${FAIL_REASONS}\n- No GitHub PR attachment found on issue"
+            FAIL_SHAPES="${FAIL_SHAPES} no_pr_attached"
           fi
 
           # Additional assertions on the attached PR(s): head ref pattern and
@@ -267,9 +297,11 @@ jobs:
 
           if [ "$PR_COUNT" -gt 0 ] && [ "$HEAD_OK" != "1" ]; then
             FAIL_REASONS="${FAIL_REASONS}\n- No attached PR has head ref matching \`${EXPECT_HEAD_PREFIX}\` (or \`${EXPECT_HEAD_PREFIX}-*\`)"
+            FAIL_SHAPES="${FAIL_SHAPES} head_ref_mismatch"
           fi
           if [ "$PR_COUNT" -gt 0 ] && [ "$CLOSES_OK" != "1" ]; then
             FAIL_REASONS="${FAIL_REASONS}\n- No attached PR body contains \`Closes ${ISSUE}\` (or \`Refs ${ISSUE}\`)"
+            FAIL_SHAPES="${FAIL_SHAPES} closes_trailer_missing"
           fi
 
           if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PR_COUNT" -gt 0 ] && [ "$HEAD_OK" = "1" ] && [ "$CLOSES_OK" = "1" ]; then
@@ -279,11 +311,98 @@ jobs:
 
           echo "::error::Verification failed — see diagnostic below"
 
-          BODY=$(printf '❌ **Implement failed verification** — _(trace: %s)_\n\nClaude finished without leaving the issue in the expected end state.\n%b\n\n[Workflow run](%s/%s/actions/runs/%s)' \
-            "$TRACE" "$FAIL_REASONS" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
-          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+          # Classify: every shape in FAIL_SHAPES must be one of the recognized
+          # ablatable shapes for the run to qualify for auto-replan.
+          ABLATABLE=1
+          for shape in $FAIL_SHAPES; do
+            case "$shape" in
+              head_ref_mismatch|closes_trailer_missing|state_mismatch|no_pr_attached) ;;
+              *) ABLATABLE=0 ;;
+            esac
+          done
+          # Empty FAIL_SHAPES with verification failure shouldn't happen, but
+          # guard against it: treat as non-ablatable to be safe.
+          [ -z "$FAIL_SHAPES" ] && ABLATABLE=0
+          # Trim leading space from FAIL_SHAPES for display.
+          FAIL_SHAPES_TRIM=$(echo "$FAIL_SHAPES" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+/, /g')
 
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # Decide between auto-replan and Stuck:
+          #   - need at least one ablatable failure shape
+          #   - need a dispatch token to actually fire linear-replan
+          #   - must be under AUTO_REPLAN_MAX retries on this issue
+          NEXT_ATTEMPT=$(( PRIOR_STUCK_COUNT + 1 ))
+          DO_REPLAN=0
+          REPLAN_SKIP_REASON=""
+          if [ "$ABLATABLE" = "1" ]; then
+            if [ -z "${GH_DISPATCH_TOKEN:-}" ]; then
+              REPLAN_SKIP_REASON="no GITHUB_DISPATCH_TOKEN secret configured on this repo"
+            elif [ "$PRIOR_STUCK_COUNT" -ge "$AUTO_REPLAN_MAX" ]; then
+              REPLAN_SKIP_REASON="auto-replan cap reached (${PRIOR_STUCK_COUNT}/${AUTO_REPLAN_MAX} prior auto-retries)"
+            else
+              DO_REPLAN=1
+            fi
+          else
+            REPLAN_SKIP_REASON="failure shape not recognized (one of: ${FAIL_SHAPES_TRIM:-<none>})"
+          fi
+
+          # Structured Stuck-context comment. Magic prefix is grep-able by
+          # future readers (linear-pickup, humans, this same step on retry).
+          # Body intentionally redundant with what a human would write so the
+          # next pickup has everything it needs in one comment.
+          BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `linear-implement` ([run](%s))\n**Failure shapes:** `%s`\n**Prior auto-retries:** %d / %d\n**Next action:** %s\n\n### What failed\n%b\n\n_Next pickup (human moves back to Todo (AI), or auto-replan succeeds): this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
+            "$TRACE" \
+            "$RUN_URL" \
+            "${FAIL_SHAPES_TRIM:-unknown}" \
+            "$PRIOR_STUCK_COUNT" \
+            "$AUTO_REPLAN_MAX" \
+            "$( [ "$DO_REPLAN" = "1" ] && echo "dispatching linear-replan (auto-retry $NEXT_ATTEMPT / $AUTO_REPLAN_MAX)" || echo "flipping to Stuck — $REPLAN_SKIP_REASON" )" \
+            "$FAIL_REASONS")
+
+          # Post the Stuck-context comment and capture its ID — we need the ID
+          # for the linear-replan dispatch (replan reads `client_payload.comment_id`
+          # as the "user's replan instruction").
+          POST_RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success comment{id}}}",variables:{id:$id,body:$body}}')")
+          STUCK_COMMENT_ID=$(echo "$POST_RESP" | jq -r '.data.commentCreate.comment.id // empty')
+          echo "trace=${TRACE} posted Stuck-context comment id=${STUCK_COMMENT_ID:-<none>}"
+
+          if [ "$DO_REPLAN" = "1" ] && [ -n "$STUCK_COMMENT_ID" ]; then
+            # Fire linear-replan via repository_dispatch. We point comment_id at
+            # the Stuck-context comment we just posted; the replan workflow
+            # treats it as the "user's replan instruction" — which it is, in
+            # spirit (the loop is asking itself to try again, with a stronger
+            # prompt about the specific things that broke). Issue state will
+            # be flipped to Planning by linear-replan itself.
+            DISPATCH_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches"
+            PAYLOAD=$(jq -nc \
+              --arg issue "$ISSUE" \
+              --arg comment "$STUCK_COMMENT_ID" \
+              --arg trace "$TRACE" \
+              --arg shapes "$FAIL_SHAPES_TRIM" \
+              --argjson attempt "$NEXT_ATTEMPT" \
+              '{event_type:"linear-replan",client_payload:{issue_id:$issue,comment_id:$comment,trace_id:$trace,prior_failure:$shapes,attempt:$attempt}}')
+            HTTP=$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' -X POST "$DISPATCH_URL" \
+              -H "Authorization: Bearer ${GH_DISPATCH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -d "$PAYLOAD")
+            if [ "$HTTP" = "204" ]; then
+              echo "trace=${TRACE} dispatched linear-replan (attempt ${NEXT_ATTEMPT}/${AUTO_REPLAN_MAX}, shapes=${FAIL_SHAPES_TRIM})"
+              # Auto-replan dispatched; don't flip to Stuck. linear-replan will
+              # take it from here. We still exit 1 so the implement run is
+              # marked failed in GitHub Actions (it did fail verification).
+              exit 1
+            else
+              echo "::warning::repository_dispatch to fire linear-replan failed (HTTP ${HTTP}). Falling back to Stuck."
+              cat /tmp/dispatch.out || true
+              # fall through to Stuck flip below
+            fi
+          fi
+
+          # Stuck path: either non-ablatable, cap reached, no dispatch token,
+          # or dispatch failed. Flip state and bail.
           if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
             curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
               -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
