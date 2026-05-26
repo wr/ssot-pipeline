@@ -243,8 +243,7 @@ async function handleCommentCreate(event: LinearEvent, env: Env, trace: string):
     return;
   }
 
-  const bodyLower = comment.body.toLowerCase();
-  const isApproval = (config.approval_phrases as string[]).some((phrase) => bodyLower.includes(phrase.toLowerCase()));
+  const isApproval = (config.approval_phrases as string[]).some((phrase) => matchesApprovalPhrase(comment.body, phrase));
 
   if (isApproval) {
     console.log(`trace=${trace} issue ${issueId}: firing linear-implement (approval phrase in comment=${comment.id})`);
@@ -358,6 +357,28 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
 
 function lookupRepo(projectId: string): string | null {
   return (config.project_to_repo as Record<string, string>)[projectId] ?? null;
+}
+
+// Escape regex metacharacters in a literal phrase so it can be embedded in a RegExp source.
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Match an approval phrase against a comment body using case-insensitive
+// word-boundary semantics. Phrases that contain at least one word character
+// use `\b...\b` so "ship it" matches "Ship it!" but not "shipping it" or
+// "I don't think we should ship it casually". Phrases made entirely of
+// non-word characters (e.g. emoji like 👍 or ✅) fall back to a plain
+// case-insensitive substring check, since `\b` is defined as the boundary
+// between word and non-word characters and would never match around them.
+function matchesApprovalPhrase(body: string, phrase: string): boolean {
+  if (!phrase) return false;
+  const hasWordChar = /\w/.test(phrase);
+  if (!hasWordChar) {
+    return body.toLowerCase().includes(phrase.toLowerCase());
+  }
+  const pattern = new RegExp(`\\b${escapeRegex(phrase)}\\b`, "i");
+  return pattern.test(body);
 }
 
 async function fireDispatch(
