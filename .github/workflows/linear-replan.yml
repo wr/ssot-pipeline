@@ -205,8 +205,11 @@ jobs:
 
           echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$PLAN_COUNT (before=${PLAN_COUNT_BEFORE:-0})"
 
-          BODY=$(printf '❌ **Replan failed verification** — _(trace: %s)_\n\nClaude finished without posting a new plan or leaving the issue in the expected state.\n\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments before: %d\n- Plan comments after: %d\n\n[Workflow run](%s/%s/actions/runs/%s)' \
-            "$TRACE" "$EXPECT_STATE" "$STATE" "${PLAN_COUNT_BEFORE:-0}" "$PLAN_COUNT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # Structured Stuck-context comment (matches the format from
+          # linear-implement / pr-fix so future readers can grep one prefix).
+          BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `linear-replan` ([run](%s))\n**Failure shapes:** `replan_no_plan_posted`\n**Next action:** flipping to Stuck — human needs to look\n\n### What failed\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments before: %d\n- Plan comments after: %d\n- Claude finished without posting a new plan or leaving the issue in the expected state.\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
+            "$TRACE" "$RUN_URL" "$EXPECT_STATE" "$STATE" "${PLAN_COUNT_BEFORE:-0}" "$PLAN_COUNT")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 

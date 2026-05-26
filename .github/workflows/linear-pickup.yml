@@ -260,8 +260,11 @@ jobs:
 
           echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$MARKER_COUNT, structured(plan_posted='$SO_PLAN_POSTED' state_set='$SO_STATE_SET')"
 
-          BODY=$(printf '❌ **Pickup failed verification** — _(trace: %s)_\n\nClaude finished without leaving the issue in the expected state.\n\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments found: %d\n\n[Workflow run](%s/%s/actions/runs/%s)' \
-            "$TRACE" "$EXPECT_STATE" "$STATE" "$MARKER_COUNT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # Structured Stuck-context comment (matches the format from
+          # linear-implement / pr-fix / linear-replan so future readers can grep one prefix).
+          BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `linear-pickup` ([run](%s))\n**Failure shapes:** `pickup_no_plan_posted`\n**Next action:** flipping to Stuck — human needs to look\n\n### What failed\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments found: %d\n- structured_output: plan_posted=`%s` state_set=`%s`\n- Claude finished without leaving the issue in the expected state.\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
+            "$TRACE" "$RUN_URL" "$EXPECT_STATE" "$STATE" "$MARKER_COUNT" "${SO_PLAN_POSTED:-<empty>}" "${SO_STATE_SET:-<empty>}")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 

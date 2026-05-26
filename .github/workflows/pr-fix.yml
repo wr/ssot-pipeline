@@ -183,7 +183,11 @@ jobs:
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
-          LINEAR_BODY=$(printf '🛑 **Auto-fix cap reached on PR #%s** — %s has requested changes %s times (max %s). Not dispatching another fix. _(trace: %s)_' "$PR" "$REVIEW_BOT_LOGIN" "$COUNT" "$MAX" "$TRACE")
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # Structured Stuck-context comment (matches the format from
+          # linear-implement so future readers can grep one prefix).
+          LINEAR_BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `pr-fix` ([run](%s))\n**Failure shapes:** `auto_fix_cap_reached`\n**PR:** #%s\n**Next action:** flipping to Stuck — human needs to look\n\n### What failed\n- `%s` has requested changes %s times (max %s). Not dispatching another fix; the reviewer keeps finding blocking issues we can'"'"'t self-resolve.\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
+            "$TRACE" "$RUN_URL" "$PR" "$REVIEW_BOT_LOGIN" "$COUNT" "$MAX")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 
@@ -443,7 +447,12 @@ jobs:
             -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$id}}')" \
             | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
-          LINEAR_BODY=$(printf '❌ **Auto-fix failed verification on PR #%s** — Claude did not push any new commits. [Workflow run](%s) _(trace: %s)_' "$PR" "$RUN_URL" "$TRACE")
+          # Structured Stuck-context comment (matches linear-implement format).
+          # Failure shape: claude finished without pushing any new commits AND
+          # didn't explicitly mark this as a no-fix-needed run — could be a
+          # confused model, ambiguous review, or a tool-call hang.
+          LINEAR_BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `pr-fix` ([run](%s))\n**Failure shapes:** `no_new_commits`\n**PR:** #%s\n**Next action:** flipping to Stuck — human needs to look\n\n### What failed\n- Claude finished without pushing any new commits.\n- structured_output.action_taken was not `no_fix_needed` and no `<!-- pr-fix-no-fix-needed -->` marker was posted on the PR.\n- This usually means the model got stuck mid-task, the review comments were ambiguous, or the fix attempt hit a tool/turn limit.\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
+            "$TRACE" "$RUN_URL" "$PR")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 
