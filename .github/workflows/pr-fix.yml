@@ -38,13 +38,52 @@ jobs:
     steps:
       - name: Trace
         id: trace
-        # PR-side workflows mint their own trace ID — they're triggered by
-        # pull_request_review events from GitHub, not repository_dispatch from
-        # the Worker, so there's no upstream trace to propagate.
+        # W-144: stitch trace IDs across the Linear→GitHub boundary. We resolve
+        # the originating Linear issue from the PR body trailer (`Closes W-XX`)
+        # or branch name (`wells/w-XX-...`) and inherit the trace from the issue's
+        # most recent comments. Falls back to minting fresh when there's no
+        # issue ID or no prior trace — never blocks the fix.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          TRACE=$(openssl rand -hex 4)
+          set -euo pipefail
+          ISSUE=""
+          if [ -n "${PR_BODY:-}" ]; then
+            ISSUE=$(printf '%s' "$PR_BODY" | grep -oiE '(Closes|Refs)[[:space:]]+W-[0-9]+' | head -1 | grep -oiE 'W-[0-9]+' | tr '[:lower:]' '[:upper:]') || true
+          fi
+          if [ -z "$ISSUE" ] && [ -n "${HEAD_REF:-}" ]; then
+            ISSUE=$(printf '%s' "$HEAD_REF" | grep -oiE 'w-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]') || true
+          fi
+
+          TRACE=""
+          SOURCE="minted"
+          if [ -n "$ISSUE" ] && [ -n "${LINEAR_APP_TOKEN:-}" ]; then
+            QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){comments(first:5,orderBy:updatedAt){nodes{body updatedAt}}}}",variables:{id:$id}}')
+            RESP=$(curl -sS -m 8 -X POST https://api.linear.app/graphql \
+              -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$QUERY" || true)
+            CANDIDATE=$(printf '%s' "$RESP" \
+              | jq -r '.data.issue.comments.nodes[]?.body // empty' \
+              | grep -oiE 'trace[[:space:]:=_-]+[a-f0-9]{8}' \
+              | head -1 \
+              | grep -oiE '[a-f0-9]{8}' \
+              | tr '[:upper:]' '[:lower:]' || true)
+            if [ -n "$CANDIDATE" ]; then
+              TRACE="$CANDIDATE"
+              SOURCE="inherited from $ISSUE"
+            fi
+          fi
+
+          if [ -z "$TRACE" ]; then
+            TRACE=$(openssl rand -hex 4)
+          fi
+
           echo "TRACE=$TRACE" >> "$GITHUB_ENV"
-          echo "🔗 pr=#${PR} reviewer=${REVIEWER} trace=${TRACE}"
+          echo "🔗 pr=#${PR} reviewer=${REVIEWER} trace=${TRACE} (${SOURCE}) issue=${ISSUE:-<none>}"
 
       - name: Fetch pipeline config
         id: cfg
