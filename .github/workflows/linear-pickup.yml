@@ -166,9 +166,9 @@ jobs:
 
             Do not open PRs, do not commit code, do not @-mention. Just plan and comment.
           claude_args: |
-            --permission-mode bypassPermissions
             --mcp-config /tmp/mcp.json
-            --allowedTools mcp__linear__* Bash Read Grep Glob
+            --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "Read" "Grep" "Glob"
+            --disallowedTools "Bash" "Write" "Edit" "WebFetch" "WebSearch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
 
       - name: Verify outcome
         if: always()
