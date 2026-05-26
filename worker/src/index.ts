@@ -1,9 +1,14 @@
 import config from "../../config/pipeline.json";
+import { DedupDO } from "./dedup-do";
+
+// Re-export so wrangler can find the Durable Object class via the worker entrypoint.
+export { DedupDO };
 
 export interface Env {
   LINEAR_WEBHOOK_SECRET: string;
   LINEAR_APP_TOKEN: string;
   GITHUB_DISPATCH_TOKEN: string;
+  DEDUP: DurableObjectNamespace;
 }
 
 const CONFIG_JSON = JSON.stringify(config);
@@ -118,7 +123,45 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
   }
 
   const trace = crypto.randomUUID().slice(0, 8);
-  console.log(`trace=${trace} received ${event.type}.${event.action}`);
+
+  // Persistent dedup keyed by Linear-Delivery-Id. Linear is at-least-once;
+  // without this, two reaction/comment events arriving 200ms apart both pass
+  // HMAC + freshness and both fire repository_dispatch. See W-137.
+  const deliveryId = req.headers.get("Linear-Delivery-Id");
+  if (!deliveryId) {
+    console.warn(`trace=${trace} missing Linear-Delivery-Id header — rejecting`);
+    return new Response("missing Linear-Delivery-Id", { status: 400 });
+  }
+
+  // Per-delivery DO instance — each ID maps to its own DO, no global bottleneck.
+  const dedupStub = env.DEDUP.get(env.DEDUP.idFromName(deliveryId));
+  let alreadySeen = false;
+  try {
+    const dedupResp = await dedupStub.fetch("https://dedup/seen", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deliveryId }),
+    });
+    if (dedupResp.ok) {
+      const dedupData = (await dedupResp.json()) as { seen?: boolean };
+      alreadySeen = dedupData.seen === true;
+    } else {
+      // Fail-open: if the DO call fails, log loudly and proceed rather than
+      // dropping a real event. updatedFrom + in-workflow checks still help.
+      console.error(`trace=${trace} dedup DO returned ${dedupResp.status} — proceeding`);
+    }
+  } catch (err) {
+    console.error(`trace=${trace} dedup DO error — proceeding:`, err);
+  }
+
+  if (alreadySeen) {
+    console.log(`trace=${trace} deduped delivery=${deliveryId} ${event.type}.${event.action}`);
+    return new Response(JSON.stringify({ deduped: true, trace }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  console.log(`trace=${trace} received ${event.type}.${event.action} delivery=${deliveryId}`);
 
   try {
     if (event.type === "Issue" && (event.action === "update" || event.action === "create")) {
