@@ -260,6 +260,17 @@ jobs:
             --model ${{ steps.effort.outputs.model }}
             --max-turns ${{ steps.effort.outputs.max_turns }}
 
+      # TEMPORARY (W-170): capture per-turn tool calls so we can diagnose
+      # why claude isn't submitting reviews. Remove once W-170 is closed.
+      - name: Upload claude execution log (debug)
+        if: always() && steps.skip_check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-execution-output-${{ env.PR }}-${{ env.TRACE }}
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Verify outcome
         if: always()
         env:
