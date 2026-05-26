@@ -20,6 +20,24 @@ const CONFIG_JSON = JSON.stringify(config);
 // window applies to clock skew in either direction.
 const WEBHOOK_FRESHNESS_MS = 5 * 60 * 1000;
 
+// Structured-log helper. Emits one JSON object per line so Cloudflare Logpush /
+// `wrangler tail` can filter on `trace` natively (e.g. `jq 'select(.trace=="abc12345")'`)
+// instead of grepping string templates. The 8-char trace ID stays human-readable
+// — it's just one field on the JSON envelope. See W-144.
+//
+// `level` maps to console.log/warn/error so existing Cloudflare log routing on
+// severity still works. `event` is a short snake_case verb (e.g. "dispatch_fired",
+// "dedup_hit") that you can filter on as a stable key. `fields` carries arbitrary
+// per-event context — keep keys consistent across call sites where possible.
+export type LogLevel = "info" | "warn" | "error";
+export function log(level: LogLevel, event: string, fields: Record<string, unknown> = {}): void {
+  const payload: Record<string, unknown> = { level, event, ...fields };
+  const line = JSON.stringify(payload);
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -55,12 +73,12 @@ export default {
 // in either case using `label` (e.g. "issue W-42", "comment 0123…").
 export function resolveRepo(projectId: string | undefined, label: string, trace: string): string | null {
   if (!projectId) {
-    console.log(`trace=${trace} ${label}: no project, skipping`);
+    log("info", "resolve_repo_skip", { trace, label, reason: "no_project" });
     return null;
   }
   const repo = lookupRepo(projectId);
   if (!repo) {
-    console.log(`trace=${trace} ${label}: no repo mapping for project ${projectId}`);
+    log("info", "resolve_repo_skip", { trace, label, reason: "no_mapping", project_id: projectId });
     return null;
   }
   return repo;
@@ -79,11 +97,16 @@ export function isStateTransition(event: LinearEvent, label: string, trace: stri
   if (event.action !== "update") return true;
   const uf = event.updatedFrom;
   if (uf === undefined || uf === null) {
-    console.log(`trace=${trace} ${label}: update event missing updatedFrom — firing anyway`);
+    log("info", "state_transition_missing_updated_from", { trace, label, decision: "fire" });
     return true;
   }
   if (!("state" in uf) && !("stateId" in uf)) {
-    console.log(`trace=${trace} ${label}: update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
+    log("info", "state_transition_skip", {
+      trace,
+      label,
+      reason: "no_state_change",
+      updated_from_keys: Object.keys(uf),
+    });
     return false;
   }
   return true;
@@ -101,17 +124,22 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
   // a hard reject so attackers can't simply strip the header to opt out.
   const tsHeader = req.headers.get("Linear-Delivery-Timestamp");
   if (!tsHeader) {
-    console.warn("rejecting webhook: missing Linear-Delivery-Timestamp header");
+    log("warn", "webhook_reject", { reason: "missing_timestamp_header" });
     return new Response("missing timestamp", { status: 401 });
   }
   const ts = parseInt(tsHeader, 10);
   if (!Number.isFinite(ts)) {
-    console.warn(`rejecting webhook: malformed Linear-Delivery-Timestamp=${tsHeader}`);
+    log("warn", "webhook_reject", { reason: "malformed_timestamp", header: tsHeader });
     return new Response("invalid timestamp", { status: 401 });
   }
   const skew = Math.abs(Date.now() - ts);
   if (skew > WEBHOOK_FRESHNESS_MS) {
-    console.warn(`rejecting webhook: timestamp skew ${skew}ms exceeds ${WEBHOOK_FRESHNESS_MS}ms (header=${tsHeader})`);
+    log("warn", "webhook_reject", {
+      reason: "stale_timestamp",
+      skew_ms: skew,
+      max_ms: WEBHOOK_FRESHNESS_MS,
+      header: tsHeader,
+    });
     return new Response("stale timestamp", { status: 401 });
   }
 
@@ -129,7 +157,7 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
   // HMAC + freshness and both fire repository_dispatch. See W-137.
   const deliveryId = req.headers.get("Linear-Delivery-Id");
   if (!deliveryId) {
-    console.warn(`trace=${trace} missing Linear-Delivery-Id header — rejecting`);
+    log("warn", "webhook_reject", { trace, reason: "missing_delivery_id" });
     return new Response("missing Linear-Delivery-Id", { status: 400 });
   }
 
@@ -148,20 +176,34 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
     } else {
       // Fail-open: if the DO call fails, log loudly and proceed rather than
       // dropping a real event. updatedFrom + in-workflow checks still help.
-      console.error(`trace=${trace} dedup DO returned ${dedupResp.status} — proceeding`);
+      log("error", "dedup_do_bad_status", { trace, status: dedupResp.status, action: "proceed" });
     }
   } catch (err) {
-    console.error(`trace=${trace} dedup DO error — proceeding:`, err);
+    log("error", "dedup_do_error", {
+      trace,
+      action: "proceed",
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
   }
 
   if (alreadySeen) {
-    console.log(`trace=${trace} deduped delivery=${deliveryId} ${event.type}.${event.action}`);
+    log("info", "dedup_hit", {
+      trace,
+      delivery_id: deliveryId,
+      event_type: event.type,
+      event_action: event.action,
+    });
     return new Response(JSON.stringify({ deduped: true, trace }), {
       headers: { "Content-Type": "application/json" },
     });
   }
 
-  console.log(`trace=${trace} received ${event.type}.${event.action} delivery=${deliveryId}`);
+  log("info", "webhook_received", {
+    trace,
+    delivery_id: deliveryId,
+    event_type: event.type,
+    event_action: event.action,
+  });
 
   try {
     if (event.type === "Issue" && (event.action === "update" || event.action === "create")) {
@@ -171,12 +213,12 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
     } else if (event.type === "Comment" && event.action === "create") {
       await handleCommentCreate(event, env, trace);
     } else {
-      console.log(`trace=${trace} ignored: ${event.type}.${event.action}`);
+      log("info", "webhook_ignored", { trace, event_type: event.type, event_action: event.action });
     }
     return new Response("ok");
   } catch (err) {
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    console.error(`trace=${trace} handler error:`, msg, err);
+    log("error", "handler_error", { trace, message: msg });
     return new Response(`handler error: ${msg}`, { status: 500 });
   }
 }
@@ -216,20 +258,35 @@ async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): P
     const repo = resolveRepo(issueProjectId, `issue ${issue.identifier}`, trace);
     if (!repo) return;
 
-    console.log(`trace=${trace} issue ${issue.identifier}: firing linear-pickup (action=${event.action})`);
+    log("info", "dispatch_decision", {
+      trace,
+      issue_id: issue.identifier,
+      event_type: "linear-pickup",
+      action: event.action,
+    });
     await fireDispatch(repo, "linear-pickup", { issue_id: issue.identifier, trace_id: trace }, env, trace);
 
     try {
       await postReaction({ issueId: issue.id }, config.approval_ack_emoji, env, trace);
     } catch (err) {
-      console.error(`trace=${trace} failed to post issue ack reaction:`, err);
+      log("error", "ack_reaction_failed", {
+        trace,
+        target: "issue",
+        issue_id: issue.identifier,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
     }
   } else if (stateName === config.in_progress_state) {
     // Human manually moved issue to In Progress — treat as plan approval.
     // Gate on actorId to prevent the workflow's own "Flip to In Progress" step
     // (which runs under the Linear app token) from looping back here.
     if (!event.actorId || !(config.approved_user_ids as string[]).includes(event.actorId)) {
-      console.log(`trace=${trace} issue ${issue.identifier}: In Progress transition by non-approved actor ${event.actorId ?? "unknown"}, skipping`);
+      log("info", "in_progress_skip", {
+        trace,
+        issue_id: issue.identifier,
+        reason: "non_approved_actor",
+        actor_id: event.actorId ?? null,
+      });
       return;
     }
 
@@ -241,10 +298,20 @@ async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): P
     const repo = resolveRepo(issueProjectId, `issue ${issue.identifier}`, trace);
     if (!repo) return;
 
-    console.log(`trace=${trace} issue ${issue.identifier}: firing linear-implement (manual In Progress by actor ${event.actorId})`);
+    log("info", "dispatch_decision", {
+      trace,
+      issue_id: issue.identifier,
+      event_type: "linear-implement",
+      reason: "manual_in_progress",
+      actor_id: event.actorId,
+    });
     await fireDispatch(repo, "linear-implement", { issue_id: issue.identifier, trace_id: trace }, env, trace);
   } else {
-    console.log(`trace=${trace} issue ${issue.identifier}: state "${stateName}" not actionable, skipping`);
+    log("info", "issue_state_not_actionable", {
+      trace,
+      issue_id: issue.identifier,
+      state: stateName ?? null,
+    });
   }
 }
 
@@ -257,19 +324,31 @@ async function handleReactionCreate(event: LinearEvent, env: Env, trace: string)
 
   const comment = await fetchComment(reaction.commentId, env);
   if (!comment) {
-    console.log(`trace=${trace} reaction: could not fetch comment ${reaction.commentId}`);
+    log("info", "reaction_skip", {
+      trace,
+      reason: "comment_fetch_failed",
+      comment_id: reaction.commentId,
+    });
     return;
   }
 
   if (!comment.body.startsWith(config.plan_marker)) {
-    console.log(`trace=${trace} reaction on non-plan comment ${reaction.commentId}, skipping`);
+    log("info", "reaction_skip", {
+      trace,
+      reason: "non_plan_comment",
+      comment_id: reaction.commentId,
+    });
     return;
   }
 
   const issueId = comment.issue?.identifier;
   const projectId = comment.issue?.project?.id;
   if (!issueId || !projectId) {
-    console.log(`trace=${trace} reaction: comment ${reaction.commentId} missing issue/project context`);
+    log("info", "reaction_skip", {
+      trace,
+      reason: "missing_issue_or_project",
+      comment_id: reaction.commentId,
+    });
     return;
   }
 
@@ -283,7 +362,12 @@ async function handleReactionCreate(event: LinearEvent, env: Env, trace: string)
   try {
     await postReaction({ commentId: reaction.commentId }, config.approval_ack_emoji, env, trace);
   } catch (err) {
-    console.error(`trace=${trace} failed to post ack reaction:`, err);
+    log("error", "ack_reaction_failed", {
+      trace,
+      target: "comment",
+      comment_id: reaction.commentId,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
   }
 }
 
@@ -291,30 +375,46 @@ async function handleCommentCreate(event: LinearEvent, env: Env, trace: string):
   const comment = event.data as LinearComment;
 
   if (!comment.userId || !config.approved_user_ids.includes(comment.userId)) {
-    console.log(`trace=${trace} ignored: Comment.create (userId=${comment.userId ?? "unknown"} not in approved list)`);
+    log("info", "comment_skip", {
+      trace,
+      reason: "non_approved_user",
+      user_id: comment.userId ?? null,
+    });
     return;
   }
 
   if (!comment.parentId) {
-    console.log(`trace=${trace} ignored: Comment.create (top-level, no parentId)`);
+    log("info", "comment_skip", { trace, reason: "top_level_no_parent" });
     return;
   }
 
   const parent = await fetchComment(comment.parentId, env);
   if (!parent) {
-    console.log(`trace=${trace} Comment.create: could not fetch parent comment ${comment.parentId}`);
+    log("info", "comment_skip", {
+      trace,
+      reason: "parent_fetch_failed",
+      parent_id: comment.parentId,
+    });
     return;
   }
 
   if (!parent.body.startsWith(config.plan_marker)) {
-    console.log(`trace=${trace} ignored: Comment.create (reply to non-plan comment ${comment.parentId})`);
+    log("info", "comment_skip", {
+      trace,
+      reason: "reply_to_non_plan",
+      parent_id: comment.parentId,
+    });
     return;
   }
 
   const issueId = parent.issue?.identifier;
   const projectId = parent.issue?.project?.id;
   if (!issueId || !projectId) {
-    console.log(`trace=${trace} Comment.create: parent comment ${comment.parentId} missing issue/project context`);
+    log("info", "comment_skip", {
+      trace,
+      reason: "missing_issue_or_project",
+      parent_id: comment.parentId,
+    });
     return;
   }
 
@@ -324,18 +424,34 @@ async function handleCommentCreate(event: LinearEvent, env: Env, trace: string):
   const isApproval = (config.approval_phrases as string[]).some((phrase) => matchesApprovalPhrase(comment.body, phrase));
 
   if (isApproval) {
-    console.log(`trace=${trace} issue ${issueId}: firing linear-implement (approval phrase in comment=${comment.id})`);
+    log("info", "dispatch_decision", {
+      trace,
+      issue_id: issueId,
+      event_type: "linear-implement",
+      reason: "approval_phrase",
+      comment_id: comment.id,
+    });
     await fireDispatch(repo, "linear-implement", { issue_id: issueId, approval_comment_id: comment.id, trace_id: trace }, env, trace);
     return;
   }
 
-  console.log(`trace=${trace} issue ${issueId}: firing linear-replan (comment=${comment.id})`);
+  log("info", "dispatch_decision", {
+    trace,
+    issue_id: issueId,
+    event_type: "linear-replan",
+    comment_id: comment.id,
+  });
   await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: comment.id, trace_id: trace }, env, trace);
 
   try {
     await postReaction({ commentId: comment.id }, config.approval_ack_emoji, env, trace);
   } catch (err) {
-    console.error(`trace=${trace} failed to post comment ack reaction:`, err);
+    log("error", "ack_reaction_failed", {
+      trace,
+      target: "comment",
+      comment_id: comment.id,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
   }
 }
 
@@ -371,7 +487,7 @@ async function postReaction(
 
   const text = await resp.text();
   if (!resp.ok) {
-    console.error(`trace=${trace} reactionCreate failed: ${resp.status} ${text}`);
+    log("error", "reaction_create_failed", { trace, target: targetLabel, status: resp.status, body: text });
     return;
   }
 
@@ -379,16 +495,21 @@ async function postReaction(
   try {
     data = JSON.parse(text);
   } catch {
-    console.error(`trace=${trace} reactionCreate response not JSON: ${text}`);
+    log("error", "reaction_create_bad_json", { trace, target: targetLabel, body: text });
     return;
   }
 
   if (data.errors) {
-    console.error(`trace=${trace} reactionCreate errors:`, JSON.stringify(data.errors));
+    log("error", "reaction_create_graphql_errors", { trace, target: targetLabel, errors: data.errors });
     return;
   }
 
-  console.log(`trace=${trace} posted ${emoji} reaction to ${targetLabel}: success=${data.data?.reactionCreate?.success}`);
+  log("info", "reaction_posted", {
+    trace,
+    target: targetLabel,
+    emoji,
+    success: data.data?.reactionCreate?.success ?? null,
+  });
 }
 
 async function fetchComment(commentId: string, env: Env): Promise<LinearComment | null> {
@@ -416,7 +537,7 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
 
   const text = await resp.text();
   if (!resp.ok) {
-    console.error(`Linear fetch failed: ${resp.status} ${text}`);
+    log("error", "linear_fetch_comment_failed", { status: resp.status, body: text });
     return null;
   }
 
@@ -424,12 +545,12 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
   try {
     data = JSON.parse(text);
   } catch {
-    console.error(`Linear response not JSON: ${text}`);
+    log("error", "linear_fetch_comment_bad_json", { body: text });
     return null;
   }
 
   if (data.errors) {
-    console.error(`Linear GraphQL errors:`, JSON.stringify(data.errors));
+    log("error", "linear_fetch_comment_graphql_errors", { errors: data.errors });
     return null;
   }
 
@@ -488,12 +609,19 @@ async function fireDispatch(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const resp = await fetch(url, { ...reqInit, signal: AbortSignal.timeout(8000) });
     if (resp.ok) {
-      console.log(`trace=${trace} fired ${eventType} to ${repo}`, payload);
+      log("info", "dispatch_fired", { trace, repo, event_type: eventType, payload });
       return;
     }
     const text = await resp.text();
     if (attempt < maxAttempts && resp.status >= 500) {
-      console.warn(`trace=${trace} dispatch attempt ${attempt} failed (${resp.status}), retrying in 500ms`);
+      log("warn", "dispatch_retry", {
+        trace,
+        repo,
+        event_type: eventType,
+        attempt,
+        status: resp.status,
+        backoff_ms: 500,
+      });
       await new Promise((r) => setTimeout(r, 500));
       continue;
     }

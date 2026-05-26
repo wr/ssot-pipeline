@@ -18,6 +18,9 @@ on:
         required: true
       CLAUDE_REVIEWER_APP_KEY:
         required: true
+      LINEAR_APP_TOKEN:
+        required: false
+        description: 'Optional. When set, pr-review attempts to inherit the originating Linear issue trace ID for end-to-end lifecycle grep (W-144).'
 
 jobs:
   review:
@@ -42,14 +45,69 @@ jobs:
     steps:
       - name: Trace
         id: trace
-        # PR-side workflows mint their own trace ID — they're triggered by
-        # pull_request events from GitHub, not repository_dispatch from the
-        # Worker, so there's no upstream trace to propagate.
+        # W-144: stitch trace IDs across the Linear→GitHub boundary. The PR was
+        # originally opened by linear-implement, which embedded `Closes W-XX`
+        # in the body and used a `wells/w-XX-...` branch. We resolve W-XX,
+        # fetch the most recent Linear comments on that issue, and inherit the
+        # 8-char trace ID we find there. Falls back to minting fresh when there's
+        # no Linear token, no issue ID, or no prior trace in the comments —
+        # never blocks the review.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          TRACE=$(openssl rand -hex 4)
+          set -euo pipefail
+          # 1. Resolve a Linear issue ID from PR body trailer (canonical) or
+          #    branch name fallback. Case-insensitive match on `Closes W-NNN`
+          #    or `Refs W-NNN`; branch like `wells/w-65-...`.
+          ISSUE=""
+          if [ -n "${PR_BODY:-}" ]; then
+            ISSUE=$(printf '%s' "$PR_BODY" | grep -oiE '(Closes|Refs)[[:space:]]+W-[0-9]+' | head -1 | grep -oiE 'W-[0-9]+' | tr '[:lower:]' '[:upper:]') || true
+          fi
+          if [ -z "$ISSUE" ] && [ -n "${HEAD_REF:-}" ]; then
+            ISSUE=$(printf '%s' "$HEAD_REF" | grep -oiE 'w-[0-9]+' | head -1 | tr '[:lower:]' '[:upper:]') || true
+          fi
+
+          # 2. If we found an issue and have a Linear token, query GraphQL for
+          #    the most recent comments and grep for an 8-char hex trace ID.
+          #    Matches `trace: abc12345`, `trace=abc12345`, `_(trace: abc12345)_`.
+          TRACE=""
+          SOURCE="minted"
+          if [ -n "$ISSUE" ] && [ -n "${LINEAR_APP_TOKEN:-}" ]; then
+            # 5 most-recently-updated comments is a small enough window to be
+            # cheap but big enough to catch the most recent pickup/implement/replan
+            # trace even if intervening human chatter happened.
+            QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){comments(first:5,orderBy:updatedAt){nodes{body updatedAt}}}}",variables:{id:$id}}')
+            RESP=$(curl -sS -m 8 -X POST https://api.linear.app/graphql \
+              -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "$QUERY" || true)
+            # Concatenate comment bodies and pick the FIRST matching 8-char hex
+            # trace. Comments are ordered newest-first, so first hit is freshest.
+            CANDIDATE=$(printf '%s' "$RESP" \
+              | jq -r '.data.issue.comments.nodes[]?.body // empty' \
+              | grep -oiE 'trace[[:space:]:=_-]+[a-f0-9]{8}' \
+              | head -1 \
+              | grep -oiE '[a-f0-9]{8}' \
+              | tr '[:upper:]' '[:lower:]' || true)
+            if [ -n "$CANDIDATE" ]; then
+              TRACE="$CANDIDATE"
+              SOURCE="inherited from $ISSUE"
+            fi
+          fi
+
+          # 3. Fall back to minting fresh — always succeeds, no upstream
+          #    dependency. SOURCE stays "minted".
+          if [ -z "$TRACE" ]; then
+            TRACE=$(openssl rand -hex 4)
+          fi
+
           echo "TRACE=$TRACE" >> "$GITHUB_ENV"
           echo "trace=$TRACE" >> "$GITHUB_OUTPUT"
-          echo "🔗 pr=#${PR} effort=${EFFORT} trace=${TRACE} title='${{ github.event.pull_request.title }}'"
+          echo "🔗 pr=#${PR} effort=${EFFORT} trace=${TRACE} (${SOURCE}) issue=${ISSUE:-<none>}"
 
       - uses: actions/checkout@v4
         with:
