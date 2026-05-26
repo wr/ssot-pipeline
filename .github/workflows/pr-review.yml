@@ -3,6 +3,10 @@ name: pr-review (reusable)
 on:
   workflow_call:
     inputs:
+      config_url:
+        description: 'Pipeline config Worker URL — set SSOT_WORKER_URL as a GitHub Actions variable on the target repo'
+        type: string
+        default: ''
       effort:
         description: 'Review depth: low (fast pass, docs PRs), medium (default), high (security-sensitive or large PRs)'
         type: string
@@ -33,6 +37,7 @@ jobs:
     env:
       PR: ${{ github.event.pull_request.number }}
       EFFORT: ${{ inputs.effort || 'medium' }}
+      CONFIG_URL: ${{ inputs.config_url }}
     steps:
       - name: Trace
         id: trace
@@ -47,6 +52,17 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch pipeline config
+        id: cfg
+        run: |
+          set -euo pipefail
+          if [ -z "${CONFIG_URL:-}" ]; then
+            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
+            exit 1
+          fi
+          CONFIG=$(curl -sS "$CONFIG_URL")
+          echo "review_bot_login=$(echo "$CONFIG" | jq -r '.review_bot_login')" >> "$GITHUB_OUTPUT"
 
       - name: Skip if PR modifies workflow files
         id: skip_check
@@ -106,9 +122,9 @@ jobs:
         # The PR was opened by claude[bot] (the `claude` GitHub App). GitHub
         # blocks PR authors from approving/requesting-changes on their own PRs,
         # so the review identity has to be a different App. We mint an
-        # installation token for the `wr-claude-reviewer` App here and pass it
-        # to claude-code-action as `github_token` — reviews then appear under
-        # `wr-claude-reviewer[bot]` and APPROVE/REQUEST_CHANGES stick.
+        # installation token for the reviewer App (CLAUDE_REVIEWER_APP_ID) here
+        # and pass it to claude-code-action as `github_token` — reviews appear
+        # under that App's bot login and APPROVE/REQUEST_CHANGES stick.
         if: steps.skip_check.outputs.skip != 'true'
         id: reviewer_token
         uses: actions/create-github-app-token@v1
@@ -127,7 +143,7 @@ jobs:
 
             Before looking at the diff, read the project's CLAUDE.md file to understand its conventions and rules.
 
-            **Check for prior review rounds.** Use `mcp__github__list_pull_request_reviews` and `mcp__github__list_pull_request_review_comments` (or `pull_request_read` with the appropriate method) to see whether `wr-claude-reviewer[bot]` has already reviewed this PR. If yes, this is a follow-up round, not a first pass — handle it accordingly:
+            **Check for prior review rounds.** Use `mcp__github__list_pull_request_reviews` and `mcp__github__list_pull_request_review_comments` (or `pull_request_read` with the appropriate method) to see whether `${{ steps.cfg.outputs.review_bot_login }}` has already reviewed this PR. If yes, this is a follow-up round, not a first pass — handle it accordingly:
             - Open your review summary with `Round N follow-up — <one-line status>` where status is "previous findings addressed" / "previous findings partially addressed" / "previous findings still unresolved" / "no new changes since prior review".
             - Drop any prior `blocking` finding whose underlying code is no longer present or has been fixed in the current diff. Do NOT re-file it.
             - Re-flag prior `blocking` findings that remain unresolved (the same problematic code still exists at the same place) — note it's a repeat.
@@ -162,11 +178,11 @@ jobs:
             echo "✓ verification skipped — PR modifies workflows (claude-code-action OIDC limitation)"
             exit 0
           fi
-          REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "wr-claude-reviewer[bot]")] | length')
-          echo "wr-claude-reviewer[bot] reviews on PR #$PR: $REVIEWS"
+          REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "${{ steps.cfg.outputs.review_bot_login }}")] | length')
+          echo "${{ steps.cfg.outputs.review_bot_login }} reviews on PR #$PR: $REVIEWS"
           if [ "$REVIEWS" -gt 0 ]; then
             echo "✓ verification passed"
             exit 0
           fi
-          echo "::error::Verification failed — wr-claude-reviewer[bot] did not post a review on PR #$PR"
+          echo "::error::Verification failed — ${{ steps.cfg.outputs.review_bot_login }} did not post a review on PR #$PR"
           exit 1

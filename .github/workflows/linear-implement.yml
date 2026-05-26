@@ -4,9 +4,9 @@ on:
   workflow_call:
     inputs:
       config_url:
-        description: 'Pipeline config Worker URL (override for staging)'
+        description: 'Pipeline config Worker URL — set SSOT_WORKER_URL as a GitHub Actions variable on the target repo'
         type: string
-        default: 'https://ssot-pipeline.wells-riley.workers.dev/config'
+        default: ''
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: true
@@ -51,6 +51,10 @@ jobs:
         id: cfg
         run: |
           set -euo pipefail
+          if [ -z "${CONFIG_URL:-}" ]; then
+            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
+            exit 1
+          fi
           CONFIG=$(curl -sS "$CONFIG_URL")
           {
             echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker')"

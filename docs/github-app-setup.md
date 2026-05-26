@@ -18,7 +18,7 @@ Walks you through installing Anthropic's GitHub App and sets `CLAUDE_CODE_OAUTH_
 
 **Alternative: API key** — no rate limits, but metered cost. Swap `claude_code_oauth_token` → `anthropic_api_key` in the workflows and set:
 ```bash
-gh secret set ANTHROPIC_API_KEY --repo wr/<target-repo>
+gh secret set ANTHROPIC_API_KEY --repo <your-github-login>/<target-repo>
 ```
 
 Note: Anthropic's GitHub App is separate from the custom `claude` App in section 3 below. Anthropic's App only handles Anthropic auth; it doesn't change which user appears as the commit author.
@@ -61,23 +61,23 @@ When you're ready to upgrade:
 3. Install the App on every target repo (from the App's "Install App" page)
 4. Store as secrets on each target repo:
    ```bash
-   gh secret set CLAUDE_BOT_APP_ID --repo wr/<target>
-   gh secret set CLAUDE_BOT_APP_PRIVATE_KEY --repo wr/<target> < path/to/private-key.pem
+   gh secret set CLAUDE_BOT_APP_ID --repo <your-github-login>/<target>
+   gh secret set CLAUDE_BOT_APP_PRIVATE_KEY --repo <your-github-login>/<target> < path/to/private-key.pem
    ```
 5. Update `templates/ssot.yml` to forward these secrets, and update `linear-implement.yml` to mint a token via `actions/create-github-app-token@v1` and pass it to `claude-code-action` via `github_token:`. The Worker can also switch from PAT to App-installation tokens — same private key.
 
 Track this upgrade as a follow-up Linear issue in the SSOT Pipeline project.
 
-## 4. Reviewer GitHub App (`wr-claude-reviewer`)
+## 4. Reviewer GitHub App (`<your-handle>-claude-reviewer`)
 
 **Why a second App?** `linear-implement.yml` opens PRs as `claude[bot]` (Anthropic's GitHub App). When `pr-review.yml` runs as the same identity, GitHub blocks any APPROVE or REQUEST_CHANGES action — "pull request authors can't approve their own pull request" — so claude can only ever leave neutral `COMMENTED` reviews. That also breaks the auto-fix loop (`pr-fix.yml` waits for a `CHANGES_REQUESTED` event that never arrives).
 
-The fix is a second GitHub App, owned by you, used only for review. `pr-review.yml` mints an installation token from it via `actions/create-github-app-token@v1` and passes it as `github_token:` to `claude-code-action`. Reviews then appear as `wr-claude-reviewer[bot]` and APPROVE/REQUEST_CHANGES stick.
+The fix is a second GitHub App, owned by you, used only for review. `pr-review.yml` mints an installation token from it via `actions/create-github-app-token@v1` and passes it as `github_token:` to `claude-code-action`. Reviews then appear as `<your-handle>-claude-reviewer[bot]` and APPROVE/REQUEST_CHANGES stick.
 
 ### Create the App (one-time)
 
 1. https://github.com/settings/apps/new
-   - **Name:** `wr-claude-reviewer` (must be globally unique; substitute your handle if taken)
+   - **Name:** `<your-handle>-claude-reviewer` (must be globally unique on GitHub; substitute your GitHub handle)
    - **Homepage URL:** any
    - **Webhook → Active:** unchecked
    - **Repository permissions:**
@@ -92,11 +92,11 @@ The fix is a second GitHub App, owned by you, used only for review. `pr-review.y
    ```bash
    security add-generic-password -U -s ssot-pipeline -a CLAUDE_REVIEWER_APP_ID -w '<app-id>'
    security add-generic-password -U -s ssot-pipeline -a CLAUDE_REVIEWER_APP_KEY \
-     -w "$(cat /path/to/wr-claude-reviewer.*.private-key.pem)"
+     -w "$(cat /path/to/<your-handle>-claude-reviewer.*.private-key.pem)"
    ```
    The PEM is multi-line; Keychain stores the bytes and `load_secret` hex-decodes on read. To rotate, regenerate the key in the App settings and re-run the seed commands with `-U`.
-5. For each target repo, re-run `./bin/init-target-repo.sh` (or set the two secrets directly with `gh secret set CLAUDE_REVIEWER_APP_ID --repo wr/<target>` and the same for the PEM).
+5. For each target repo, re-run `./bin/init-target-repo.sh` (or set the two secrets directly with `gh secret set CLAUDE_REVIEWER_APP_ID --repo <your-github-login>/<target>` and the same for the PEM).
 
-### Updating the bot login
+### The bot login must match `config/pipeline.json`
 
-If you pick a different App name, also update `review_bot_login` and `fix_reviewer_logins[0]` in `config/pipeline.json`, and the `select(.user.login == "wr-claude-reviewer[bot]")` filters in `.github/workflows/pr-review.yml` (verify step) and `.github/workflows/pr-fix.yml` (cap counter). The login is the App slug with `[bot]` appended.
+The App's bot login is the App slug with `[bot]` appended: `<your-handle>-claude-reviewer[bot]`. This value must match `review_bot_login` and `fix_reviewer_logins[0]` in `config/pipeline.json`. The workflows read these fields at runtime — no hardcoded bot logins remain in the workflow files after this setup.

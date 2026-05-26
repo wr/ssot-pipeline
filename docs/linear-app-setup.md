@@ -9,7 +9,7 @@ This is a one-time setup. Once done, every target repo wired with `init-target-r
 1. Go to https://linear.app/settings/api/applications/new
 2. Fill in:
    - **Name:** `claude`
-   - **Developer name:** Wells Riley
+   - **Developer name:** <your name>
    - **Description:** Autonomous coding agent (ssot-pipeline)
    - **Callback URLs:** `http://localhost:8787/oauth/callback` (you can change this later — just needed to satisfy the form for the OAuth dance)
    - **Webhook URL:** leave blank for now, you'll add it in step 4
