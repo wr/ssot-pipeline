@@ -1,9 +1,0 @@
-name: test-caller
-
-on:
-  repository_dispatch:
-    types: [test-caller]
-
-jobs:
-  call:
-    uses: ./.github/workflows/test-reusable.yml
