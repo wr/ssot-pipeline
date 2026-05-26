@@ -1,0 +1,11 @@
+{
+  "type": "Comment",
+  "action": "create",
+  "actorId": "95cef275-b454-485c-bd8c-4cadb6b29a08",
+  "data": {
+    "id": "comment-reply-replan",
+    "body": "actually let's use a different approach here, switch to using msw instead",
+    "parentId": "comment-plan-1",
+    "userId": "95cef275-b454-485c-bd8c-4cadb6b29a08"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "type": "Issue",
+  "action": "update",
+  "actorId": "95cef275-b454-485c-bd8c-4cadb6b29a08",
+  "updatedFrom": {
+    "priority": 3
+  },
+  "data": {
+    "id": "issue-uuid-3",
+    "identifier": "W-202",
+    "projectId": "f9eb7447-31fb-4e02-b46b-7d147f2d0f55",
+    "project": { "id": "f9eb7447-31fb-4e02-b46b-7d147f2d0f55" },
+    "state": { "name": "Todo (AI)" }
+  }
+}

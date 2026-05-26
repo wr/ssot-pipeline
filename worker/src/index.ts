@@ -53,7 +53,7 @@ export default {
 // Resolve a Linear projectId to a configured GitHub repo, or null if either
 // the project is missing or has no mapping. Logs a contextual skip message
 // in either case using `label` (e.g. "issue W-42", "comment 0123…").
-function resolveRepo(projectId: string | undefined, label: string, trace: string): string | null {
+export function resolveRepo(projectId: string | undefined, label: string, trace: string): string | null {
   if (!projectId) {
     console.log(`trace=${trace} ${label}: no project, skipping`);
     return null;
@@ -75,7 +75,7 @@ function resolveRepo(projectId: string | undefined, label: string, trace: string
 // anyway — better one extra plan than zero. We log it so any regressions in
 // Linear's webhook payload shape are visible. `create` events have no
 // `updatedFrom` and always count as a transition.
-function isStateTransition(event: LinearEvent, label: string, trace: string): boolean {
+export function isStateTransition(event: LinearEvent, label: string, trace: string): boolean {
   if (event.action !== "update") return true;
   const uf = event.updatedFrom;
   if (uf === undefined || uf === null) {
@@ -181,7 +181,7 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
   }
 }
 
-async function verifySignature(
+export async function verifySignature(
   body: string,
   signatureHex: string,
   secret: string,
@@ -436,7 +436,7 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
   return data.data?.comment ?? null;
 }
 
-function lookupRepo(projectId: string): string | null {
+export function lookupRepo(projectId: string): string | null {
   return (config.project_to_repo as Record<string, string>)[projectId] ?? null;
 }
 
@@ -452,7 +452,7 @@ function escapeRegex(s: string): string {
 // non-word characters (e.g. emoji like 👍 or ✅) fall back to a plain
 // case-insensitive substring check, since `\b` is defined as the boundary
 // between word and non-word characters and would never match around them.
-function matchesApprovalPhrase(body: string, phrase: string): boolean {
+export function matchesApprovalPhrase(body: string, phrase: string): boolean {
   if (!phrase) return false;
   const hasWordChar = /\w/.test(phrase);
   if (!hasWordChar) {
@@ -512,7 +512,7 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-type LinearEvent = {
+export type LinearEvent = {
   type: string;
   action: string;
   actorId?: string;
