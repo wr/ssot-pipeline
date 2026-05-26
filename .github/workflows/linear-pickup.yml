@@ -15,6 +15,10 @@ on:
 
 jobs:
   pickup:
+    # cancel-in-progress=false: an in-flight pickup may have already posted the
+    # plan comment and be mid-state-flip; killing it mid-run risks half-done
+    # work. Duplicate dispatches for the same issue serialize and the
+    # plan-comment idempotency check short-circuits the redundant ones.
     concurrency:
       group: linear-pickup-${{ github.event.client_payload.issue_id }}
       cancel-in-progress: false
