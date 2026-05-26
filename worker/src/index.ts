@@ -15,7 +15,7 @@ const CONFIG_JSON = JSON.stringify(config);
 
 // Webhook freshness window. HMAC verifies *who* signed the payload but says
 // nothing about *when* — so a captured signed payload would be replayable
-// forever. Require the Linear-Delivery-Timestamp header to be within ±5min
+// forever. Require the body's `webhookTimestamp` (UNIX ms) to be within ±5min
 // of wall-clock, matching Stripe's industry-standard tolerance. The same
 // window applies to clock skew in either direction.
 const WEBHOOK_FRESHNESS_MS = 5 * 60 * 1000;
@@ -120,29 +120,9 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
     return new Response("invalid signature", { status: 401 });
   }
 
-  // Freshness check — after HMAC succeeds, reject replays. Missing header is
-  // a hard reject so attackers can't simply strip the header to opt out.
-  const tsHeader = req.headers.get("Linear-Delivery-Timestamp");
-  if (!tsHeader) {
-    log("warn", "webhook_reject", { reason: "missing_timestamp_header" });
-    return new Response("missing timestamp", { status: 401 });
-  }
-  const ts = parseInt(tsHeader, 10);
-  if (!Number.isFinite(ts)) {
-    log("warn", "webhook_reject", { reason: "malformed_timestamp", header: tsHeader });
-    return new Response("invalid timestamp", { status: 401 });
-  }
-  const skew = Math.abs(Date.now() - ts);
-  if (skew > WEBHOOK_FRESHNESS_MS) {
-    log("warn", "webhook_reject", {
-      reason: "stale_timestamp",
-      skew_ms: skew,
-      max_ms: WEBHOOK_FRESHNESS_MS,
-      header: tsHeader,
-    });
-    return new Response("stale timestamp", { status: 401 });
-  }
-
+  // Parse first — freshness comes from the body's `webhookTimestamp` field,
+  // not a header (Linear doesn't send one). Parse failure is 400, distinct
+  // from the 401 replay-protection rejections below.
   let event: LinearEvent;
   try {
     event = JSON.parse(body);
@@ -150,15 +130,37 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
     return new Response("invalid json", { status: 400 });
   }
 
+  // Freshness check — after HMAC succeeds, reject replays. Missing field is
+  // a hard reject so attackers can't simply strip it to opt out.
+  const ts = event.webhookTimestamp;
+  if (ts === undefined || ts === null) {
+    log("warn", "webhook_reject", { reason: "missing_webhook_timestamp" });
+    return new Response("missing webhookTimestamp", { status: 401 });
+  }
+  if (typeof ts !== "number" || !Number.isFinite(ts)) {
+    log("warn", "webhook_reject", { reason: "malformed_webhook_timestamp", value: ts });
+    return new Response("invalid webhookTimestamp", { status: 401 });
+  }
+  const skew = Math.abs(Date.now() - ts);
+  if (skew > WEBHOOK_FRESHNESS_MS) {
+    log("warn", "webhook_reject", {
+      reason: "stale_webhook_timestamp",
+      skew_ms: skew,
+      max_ms: WEBHOOK_FRESHNESS_MS,
+      ts,
+    });
+    return new Response("stale webhookTimestamp", { status: 401 });
+  }
+
   const trace = crypto.randomUUID().slice(0, 8);
 
-  // Persistent dedup keyed by Linear-Delivery-Id. Linear is at-least-once;
-  // without this, two reaction/comment events arriving 200ms apart both pass
-  // HMAC + freshness and both fire repository_dispatch. See W-137.
-  const deliveryId = req.headers.get("Linear-Delivery-Id");
+  // Persistent dedup keyed by Linear-Delivery (a UUIDv4 per delivery). Linear
+  // is at-least-once; without this, two reaction/comment events arriving 200ms
+  // apart both pass HMAC + freshness and both fire repository_dispatch. See W-137.
+  const deliveryId = req.headers.get("Linear-Delivery");
   if (!deliveryId) {
     log("warn", "webhook_reject", { trace, reason: "missing_delivery_id" });
-    return new Response("missing Linear-Delivery-Id", { status: 400 });
+    return new Response("missing Linear-Delivery", { status: 400 });
   }
 
   // Per-delivery DO instance — each ID maps to its own DO, no global bottleneck.
@@ -646,6 +648,7 @@ export type LinearEvent = {
   actorId?: string;
   data: unknown;
   updatedFrom?: Record<string, unknown> | null;
+  webhookTimestamp?: number;
 };
 
 type LinearIssue = {

@@ -231,13 +231,12 @@ describe("verifySignature", () => {
 
 describe("POST /linear — signature + freshness gate", () => {
   it("rejects with 401 when signature is missing", async () => {
-    const body = JSON.stringify(issueCreateTodoAi);
+    const body = JSON.stringify({ ...issueCreateTodoAi, webhookTimestamp: Date.now() });
     const req = new Request("https://worker.test/linear", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Linear-Delivery-Timestamp": String(Date.now()),
-        "Linear-Delivery-Id": "delivery-no-sig",
+        "Linear-Delivery": "delivery-no-sig",
       },
       body,
     });
@@ -252,24 +251,24 @@ describe("POST /linear — signature + freshness gate", () => {
     expect(resp.status).toBe(401);
   });
 
-  it("rejects with 401 when Linear-Delivery-Timestamp is missing", async () => {
+  it("rejects with 401 when webhookTimestamp is missing from the body", async () => {
     const body = JSON.stringify(issueCreateTodoAi);
     const req = await buildWebhookRequest({ body, timestamp: null });
     const resp = await SELF.fetch(req);
     expect(resp.status).toBe(401);
-    expect(await resp.text()).toBe("missing timestamp");
+    expect(await resp.text()).toBe("missing webhookTimestamp");
   });
 
-  it("rejects with 401 for a stale timestamp (>5min old)", async () => {
+  it("rejects with 401 for a stale webhookTimestamp (>5min old)", async () => {
     const body = JSON.stringify(issueCreateTodoAi);
     const staleTs = Date.now() - 10 * 60 * 1000; // 10 min ago
     const req = await buildWebhookRequest({ body, timestamp: staleTs });
     const resp = await SELF.fetch(req);
     expect(resp.status).toBe(401);
-    expect(await resp.text()).toBe("stale timestamp");
+    expect(await resp.text()).toBe("stale webhookTimestamp");
   });
 
-  it("rejects with 401 for a far-future timestamp (>5min ahead)", async () => {
+  it("rejects with 401 for a far-future webhookTimestamp (>5min ahead)", async () => {
     const body = JSON.stringify(issueCreateTodoAi);
     const futureTs = Date.now() + 10 * 60 * 1000;
     const req = await buildWebhookRequest({ body, timestamp: futureTs });
@@ -277,7 +276,7 @@ describe("POST /linear — signature + freshness gate", () => {
     expect(resp.status).toBe(401);
   });
 
-  it("rejects with 400 when Linear-Delivery-Id is missing", async () => {
+  it("rejects with 400 when Linear-Delivery is missing", async () => {
     const body = JSON.stringify(issueCreateTodoAi);
     const req = await buildWebhookRequest({ body, deliveryId: null });
     // Mock outbound — this should fail before reaching dispatch but be safe.
@@ -456,25 +455,26 @@ describe("POST /linear — routing + dispatch", () => {
 });
 
 describe("POST /linear — DO dedup", () => {
-  it("two webhooks with the same Linear-Delivery-Id → second is deduped, only one dispatch", async () => {
-    const body = JSON.stringify(issueUpdateIntoTodoAi);
+  it("two webhooks with the same Linear-Delivery → second is deduped, only one dispatch", async () => {
     const mock = installFetchMock([
       { match: (u) => u.includes("github.com"), respond: () => githubDispatchOkResponse() },
       { match: (u) => u.includes("linear.app"), respond: () => linearReactionSuccessResponse() },
     ]);
     cleanupFetch = mock.restore;
 
-    const deliveryId = `delivery-dedup-${crypto.randomUUID()}`;
+    // Pre-bake webhookTimestamp into the body so both requests share an
+    // identical signed body (buildWebhookRequest would otherwise inject a
+    // fresh ts on each call, mismatching the signatures).
+    const body = JSON.stringify({ ...issueUpdateIntoTodoAi, webhookTimestamp: Date.now() });
     const sig = await signWebhookBody(body, SECRET);
-    const ts = Date.now();
+    const deliveryId = `delivery-dedup-${crypto.randomUUID()}`;
 
     const req1 = new Request("https://worker.test/linear", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Linear-Signature": sig,
-        "Linear-Delivery-Id": deliveryId,
-        "Linear-Delivery-Timestamp": String(ts),
+        "Linear-Delivery": deliveryId,
       },
       body,
     });
@@ -486,8 +486,7 @@ describe("POST /linear — DO dedup", () => {
       headers: {
         "Content-Type": "application/json",
         "Linear-Signature": sig,
-        "Linear-Delivery-Id": deliveryId,
-        "Linear-Delivery-Timestamp": String(ts),
+        "Linear-Delivery": deliveryId,
       },
       body,
     });
