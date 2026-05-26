@@ -26,7 +26,10 @@ Before deploying a fork, update `config/pipeline.json` with your own values — 
 | `approval_emojis` | Linear emoji names that count as plan approval via reaction (default `["+1", "white_check_mark"]`) |
 | `approval_phrases` | Comment phrases/emoji that count as approval when replied to a plan (default `["ship it", "lgtm", "looks good", "approved", "go for it", "👍", "✅"]`) |
 | `approval_ack_emoji` | Linear emoji name the Worker uses as 🤖 read-receipt (default `"robot_face"`) |
-| `project_to_repo` | Clear this — `init-target-repo.sh` populates it per project |
+| `pr_fix_max_attempts` | Hard cap on auto-fix iterations per PR before flipping to Stuck (default `2`) |
+| `todo_ai_state`, `planning_state`, `plan_review_state`, `in_progress_state`, `in_review_state`, `stuck_state` | Names of the Linear workflow states the pipeline drives. Defaults match the names this repo uses — change them only if your Linear workspace uses different state names |
+| `linear_mcp_url`, `linear_mcp_transport` | Linear's MCP endpoint. Defaults are correct unless Linear changes them |
+| `project_to_repo` | Clear this (`{}`) — `init-target-repo.sh` populates it per project |
 
 Then: deploy the Worker, set secrets, and run `init-target-repo.sh` for each target repo. Full walkthrough: [`docs/fork-setup.md`](./docs/fork-setup.md).
 

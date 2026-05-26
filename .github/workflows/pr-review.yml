@@ -53,17 +53,6 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Fetch pipeline config
-        id: cfg
-        run: |
-          set -euo pipefail
-          if [ -z "${CONFIG_URL:-}" ]; then
-            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
-            exit 1
-          fi
-          CONFIG=$(curl -sS "$CONFIG_URL")
-          echo "review_bot_login=$(echo "$CONFIG" | jq -r '.review_bot_login')" >> "$GITHUB_OUTPUT"
-
       - name: Skip if PR modifies workflow files
         id: skip_check
         env:
@@ -76,6 +65,10 @@ jobs:
           # workflow to leak the app token). Detect that and exit cleanly with a
           # one-time explanatory comment, so workflow-editing PRs get a green
           # check instead of a confusing 401.
+          #
+          # This runs BEFORE Fetch pipeline config so that a workflow-editing
+          # PR opened on a repo where SSOT_WORKER_URL isn't set yet still
+          # takes the clean skip path instead of hard-failing on the cfg guard.
           COUNT=$(gh api "repos/${REPO}/pulls/${PR}/files" --paginate \
             --jq '[.[] | select(.filename | startswith(".github/workflows/"))] | length')
           if [ "$COUNT" = "0" ]; then
@@ -93,6 +86,30 @@ jobs:
           fi
           BODY=$(printf '%s\n🤖 **pr-review skipped** — this PR modifies `.github/workflows/*`, and `claude-code-action`'"'"'s OIDC token exchange requires workflow files on the PR branch to be byte-identical to `main`. Merge once approved; PRs that do not touch workflows will be reviewed normally. _(trace: %s)_' "$MARKER" "$TRACE")
           gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+
+      - name: Fetch pipeline config
+        if: steps.skip_check.outputs.skip != 'true'
+        id: cfg
+        run: |
+          set -euo pipefail
+          if [ -z "${CONFIG_URL:-}" ]; then
+            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
+            exit 1
+          fi
+          CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
+            echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
+            exit 1
+          }
+          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
+            echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
+            exit 1
+          fi
+          REVIEW_BOT_LOGIN=$(echo "$CONFIG" | jq -r '.review_bot_login // ""')
+          if [ -z "$REVIEW_BOT_LOGIN" ] || [ "$REVIEW_BOT_LOGIN" = "null" ]; then
+            echo "::error::review_bot_login is missing or null in pipeline config"
+            exit 1
+          fi
+          echo "review_bot_login=$REVIEW_BOT_LOGIN" >> "$GITHUB_OUTPUT"
 
       - name: Resolve effort settings
         if: steps.skip_check.outputs.skip != 'true'
@@ -172,17 +189,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SKIP: ${{ steps.skip_check.outputs.skip }}
+          REVIEW_BOT_LOGIN: ${{ steps.cfg.outputs.review_bot_login }}
         run: |
           set -euo pipefail
           if [ "${SKIP:-false}" = "true" ]; then
             echo "✓ verification skipped — PR modifies workflows (claude-code-action OIDC limitation)"
             exit 0
           fi
-          REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" --jq '[.[] | select(.user.login == "${{ steps.cfg.outputs.review_bot_login }}")] | length')
-          echo "${{ steps.cfg.outputs.review_bot_login }} reviews on PR #$PR: $REVIEWS"
+          if [ -z "${REVIEW_BOT_LOGIN:-}" ]; then
+            echo "::warning::cfg step did not produce review_bot_login — skipping verification (real error is upstream)"
+            exit 0
+          fi
+          REVIEWS=$(gh api "repos/$REPO/pulls/$PR/reviews" | jq --arg u "$REVIEW_BOT_LOGIN" '[.[] | select(.user.login == $u)] | length')
+          echo "${REVIEW_BOT_LOGIN} reviews on PR #$PR: $REVIEWS"
           if [ "$REVIEWS" -gt 0 ]; then
             echo "✓ verification passed"
             exit 0
           fi
-          echo "::error::Verification failed — ${{ steps.cfg.outputs.review_bot_login }} did not post a review on PR #$PR"
+          echo "::error::Verification failed — ${REVIEW_BOT_LOGIN} did not post a review on PR #$PR"
           exit 1

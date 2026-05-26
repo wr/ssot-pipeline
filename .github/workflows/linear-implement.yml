@@ -55,7 +55,14 @@ jobs:
             echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
             exit 1
           fi
-          CONFIG=$(curl -sS "$CONFIG_URL")
+          CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
+            echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
+            exit 1
+          }
+          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
+            echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
+            exit 1
+          fi
           {
             echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker')"
             echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
