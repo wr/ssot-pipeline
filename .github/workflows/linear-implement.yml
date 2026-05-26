@@ -181,9 +181,11 @@ jobs:
       - name: Verify outcome
         if: always()
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           EXPECT_STATE: ${{ steps.cfg.outputs.in_review_state }}
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+          BRANCH_PREFIX: ${{ steps.cfg.outputs.branch_prefix }}
         run: |
           set -euo pipefail
           if [ -z "${EXPECT_STATE:-}" ]; then
@@ -201,20 +203,74 @@ jobs:
 
           STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
-          PR_COUNT=$(echo "$RESP" | jq '[.data.issue.attachments.nodes[] | select(.url | contains("github.com") and contains("/pull/"))] | length')
+          PR_URLS=$(echo "$RESP" | jq -r '[.data.issue.attachments.nodes[] | select(.url | contains("github.com") and contains("/pull/")) | .url] | .[]')
+          PR_COUNT=$(echo "$PR_URLS" | grep -c . || true)
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
           echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE pr_attachments=$PR_COUNT"
 
-          if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PR_COUNT" -gt 0 ]; then
-            echo "✓ verification passed"
+          FAIL_REASONS=""
+          if [ "$STATE" != "$EXPECT_STATE" ]; then
+            FAIL_REASONS="${FAIL_REASONS}\n- State is \`$STATE\` (expected \`$EXPECT_STATE\`)"
+          fi
+          if [ "$PR_COUNT" -eq 0 ]; then
+            FAIL_REASONS="${FAIL_REASONS}\n- No GitHub PR attachment found on issue"
+          fi
+
+          # Additional assertions on the attached PR(s): head ref pattern and
+          # Closes-trailer must match this issue. ISSUE is like "W-148"; we
+          # require head ref to start with `${BRANCH_PREFIX}w-148` (case-insensitive)
+          # AND the PR body to contain `Closes W-148` (also case-insensitive).
+          # Without these, a Claude run that opens a PR against the wrong issue
+          # would silently pass.
+          ISSUE_LOWER=$(echo "$ISSUE" | tr '[:upper:]' '[:lower:]')
+          EXPECT_HEAD_PREFIX="${BRANCH_PREFIX}${ISSUE_LOWER}"
+          HEAD_OK=0
+          CLOSES_OK=0
+          MATCHED_PR=""
+          if [ "$PR_COUNT" -gt 0 ]; then
+            while IFS= read -r PR_URL; do
+              [ -z "$PR_URL" ] && continue
+              # Parse owner/repo/pr_number from URL like https://github.com/o/r/pull/123
+              PR_PATH=$(echo "$PR_URL" | sed -E 's#https?://github.com/##; s#/$##')
+              PR_OWNER_REPO=$(echo "$PR_PATH" | cut -d/ -f1-2)
+              PR_NUM=$(echo "$PR_PATH" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+              [ -z "$PR_NUM" ] && continue
+              PR_JSON=$(gh api "repos/${PR_OWNER_REPO}/pulls/${PR_NUM}" 2>/dev/null || echo '{}')
+              HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref // ""')
+              PR_BODY_TXT=$(echo "$PR_JSON" | jq -r '.body // ""')
+              echo "  PR #$PR_NUM head=$HEAD_REF"
+              # Case-insensitive prefix match. Allow exact match or prefix+'-'.
+              HEAD_LOWER=$(echo "$HEAD_REF" | tr '[:upper:]' '[:lower:]')
+              if [ "$HEAD_LOWER" = "$EXPECT_HEAD_PREFIX" ] || echo "$HEAD_LOWER" | grep -qE "^${EXPECT_HEAD_PREFIX}(-|$)"; then
+                HEAD_OK=1
+              fi
+              if echo "$PR_BODY_TXT" | grep -qiE "(Closes|Refs)[[:space:]]+${ISSUE}([^0-9]|\$)"; then
+                CLOSES_OK=1
+              fi
+              if [ "$HEAD_OK" = "1" ] && [ "$CLOSES_OK" = "1" ]; then
+                MATCHED_PR="$PR_URL"
+                break
+              fi
+            done < <(printf '%s\n' "$PR_URLS")
+          fi
+
+          if [ "$PR_COUNT" -gt 0 ] && [ "$HEAD_OK" != "1" ]; then
+            FAIL_REASONS="${FAIL_REASONS}\n- No attached PR has head ref matching \`${EXPECT_HEAD_PREFIX}\` (or \`${EXPECT_HEAD_PREFIX}-*\`)"
+          fi
+          if [ "$PR_COUNT" -gt 0 ] && [ "$CLOSES_OK" != "1" ]; then
+            FAIL_REASONS="${FAIL_REASONS}\n- No attached PR body contains \`Closes ${ISSUE}\` (or \`Refs ${ISSUE}\`)"
+          fi
+
+          if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PR_COUNT" -gt 0 ] && [ "$HEAD_OK" = "1" ] && [ "$CLOSES_OK" = "1" ]; then
+            echo "✓ verification passed (matched PR: $MATCHED_PR)"
             exit 0
           fi
 
-          echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), pr_attachments=$PR_COUNT"
+          echo "::error::Verification failed — see diagnostic below"
 
-          BODY=$(printf '❌ **Implement failed verification** — _(trace: %s)_\n\nClaude finished without leaving the issue in the expected state with a PR attached.\n\n- Expected state: `%s`\n- Actual state: `%s`\n- PR attachments found: %d\n\n[Workflow run](%s/%s/actions/runs/%s)' \
-            "$TRACE" "$EXPECT_STATE" "$STATE" "$PR_COUNT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
+          BODY=$(printf '❌ **Implement failed verification** — _(trace: %s)_\n\nClaude finished without leaving the issue in the expected end state.\n%b\n\n[Workflow run](%s/%s/actions/runs/%s)' \
+            "$TRACE" "$FAIL_REASONS" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 

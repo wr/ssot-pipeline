@@ -303,7 +303,9 @@ jobs:
             ${{ env.ISSUE && format('7. Set Linear issue {0} state to "{1}" via mcp__linear__save_issue.', env.ISSUE, steps.cfg.outputs.in_review_state) || '' }}
             ${{ env.ISSUE && format('8. Post a Linear comment on {0}: "Pushed fixes addressing the blocking findings on PR #{1}. _(trace: {2})_"', env.ISSUE, env.PR, env.TRACE) || '' }}
 
-            If you genuinely cannot fix something (ambiguous review, conflicting requests, tests fail): post a comment on the PR explaining why, ${{ env.ISSUE && format('post a Linear comment on {0} with the same explanation,', env.ISSUE) || '' }} and stop without pushing. Don't push broken code.
+            If after analyzing the review you determine **no fix is actually needed** (e.g. the blocking findings are already addressed in the latest commits, are based on a misreading of the diff, or are not applicable): post a comment on the PR whose body contains the exact HTML-comment marker `<!-- pr-fix-no-fix-needed -->` on its own (you may include human-readable explanation around it). Then stop without pushing any commits. The marker is what tells the verification step this was a deliberate no-op, not a failure. ${{ env.ISSUE && format('Also post a Linear comment on {0} with the same explanation (no need for the marker there).', env.ISSUE) || '' }}
+
+            If you genuinely cannot fix something (ambiguous review, conflicting requests, tests fail): post a comment on the PR explaining why (do NOT include the no-fix-needed marker — this is a failure, not a no-op), ${{ env.ISSUE && format('post a Linear comment on {0} with the same explanation,', env.ISSUE) || '' }} and stop without pushing. Don't push broken code.
           claude_args: |
             --permission-mode bypassPermissions
             --mcp-config /tmp/mcp.json
@@ -323,20 +325,62 @@ jobs:
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
         run: |
           set -euo pipefail
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           git fetch origin "${{ github.event.pull_request.head.ref }}"
           NEW_COMMITS=$(git rev-list "${BEFORE_SHA}..origin/${{ github.event.pull_request.head.ref }}" | wc -l | tr -d ' ')
+          # Author check: require claude[bot] on every new commit. Guards against
+          # an unrelated force-push from another actor landing during the run and
+          # masquerading as a successful fix. Empty range → empty author list.
+          NEW_AUTHORS=$(git log --format='%ae' "${BEFORE_SHA}..origin/${{ github.event.pull_request.head.ref }}" || true)
+          NON_BOT_AUTHORS=$(echo "$NEW_AUTHORS" | grep -v '^$' | grep -v 'claude\[bot\]@users\.noreply\.github\.com' || true)
           echo "trace=${TRACE} verify: new commits since ${BEFORE_SHA}: $NEW_COMMITS"
 
-          if [ "$NEW_COMMITS" -gt 0 ]; then
-            echo "✓ verification passed"
+          if [ "$NEW_COMMITS" -gt 0 ] && [ -z "$NON_BOT_AUTHORS" ]; then
+            echo "✓ verification passed (claude[bot] pushed $NEW_COMMITS commit(s))"
             exit 0
           fi
 
-          echo "::error::Verification failed — no new claude[bot] commits pushed to PR #$PR"
-
-          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          PR_BODY=$(printf '❌ **Auto-fix failed verification** — Claude finished without pushing any new commits. [Workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
-          gh pr comment "$PR" --repo "$REPO" --body "$PR_BODY" || true
+          if [ "$NEW_COMMITS" -gt 0 ] && [ -n "$NON_BOT_AUTHORS" ]; then
+            echo "::error::Verification failed — new commits found, but not all authored by claude[bot]. Non-bot authors: $NON_BOT_AUTHORS"
+            PR_BODY=$(printf '❌ **Auto-fix failed verification** — new commits pushed but not all authored by `claude[bot]`. [Workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
+            gh pr comment "$PR" --repo "$REPO" --body "$PR_BODY" || true
+          else
+            # Zero new commits. Check for the explicit "no fix needed" marker
+            # posted by Claude — that's a deliberate, successful no-op, not a
+            # failure. Without this check, every "review was wrong / already
+            # addressed" outcome flips the issue to Stuck.
+            MARKER='<!-- pr-fix-no-fix-needed -->'
+            # Look for the marker in any PR issue-comment authored by claude[bot]
+            # (the fix actor, NOT the review bot). Marker only appears when this
+            # run posts it, so scanning all comments is safe.
+            MARKER_HIT=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+              | jq --arg m "$MARKER" '[.[] | select(.user.login == "claude[bot]" and (.body | contains($m)))] | length')
+            if [ "${MARKER_HIT:-0}" -gt 0 ]; then
+              echo "✓ verification passed (no-fix-needed marker present from claude[bot])"
+              # Flip Linear back to In Review since no fix was actually applied —
+              # the PR is still in whatever state it was before the review.
+              if [ -n "${ISSUE_UUID:-}" ]; then
+                IN_REVIEW_STATE='${{ steps.cfg.outputs.in_review_state }}'
+                GQL_URL=https://api.linear.app/graphql
+                AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+                CT="Content-Type: application/json"
+                IR_UUID=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+                  -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$id}}')" \
+                  | jq -r --arg n "$IN_REVIEW_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+                if [ -n "$IR_UUID" ] && [ "$IR_UUID" != "null" ]; then
+                  curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+                    -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$IR_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+                  LB=$(printf '🟢 Auto-fix on PR #%s determined no fix was needed (marker present). Returned issue to %s. [Workflow run](%s) _(trace: %s)_' "$PR" "$IN_REVIEW_STATE" "$RUN_URL" "$TRACE")
+                  curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+                    -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LB" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+                fi
+              fi
+              exit 0
+            fi
+            echo "::error::Verification failed — no new commits and no no-fix-needed marker on PR #$PR"
+            PR_BODY=$(printf '❌ **Auto-fix failed verification** — Claude finished without pushing any new commits and without posting the `<!-- pr-fix-no-fix-needed -->` marker. [Workflow run](%s) _(trace: %s)_' "$RUN_URL" "$TRACE")
+            gh pr comment "$PR" --repo "$REPO" --body "$PR_BODY" || true
+          fi
 
           if [ -z "${ISSUE:-}" ] || [ -z "${ISSUE_UUID:-}" ]; then
             echo "::warning::No Linear issue resolved — skipping Stuck flip"
