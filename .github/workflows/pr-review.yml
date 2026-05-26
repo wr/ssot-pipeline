@@ -241,9 +241,9 @@ jobs:
 
             Approve/reject rule: use REQUEST_CHANGES only if there is at least one `blocking` finding (new or still-unresolved). Otherwise APPROVE with a brief summary of what looks good and all nits grouped at the end.
 
-            **How to actually submit the review (this is the only path that works — `gh api -X POST` is intentionally denied for safety):**
-            1. If you have inline findings, call `mcp__github__pull_request_review_write` to create a pending review, attach each inline finding via `mcp__github__add_comment_to_pending_review`, then call `mcp__github__pull_request_review_write` again to submit the pending review with the APPROVE / REQUEST_CHANGES verdict and your summary body.
-            2. If you have no inline findings (clean APPROVE with just a summary), call `mcp__github__pull_request_review_write` once to create and submit the review in one step.
+            **How to actually submit the review (this is the only path that works — `gh api -X POST` and `gh pr review` are intentionally denied for safety; you MUST use the GitHub MCP tools):**
+            1. **Inline findings**: call `mcp__github__create_pending_pull_request_review` first, then attach each finding via `mcp__github__add_pull_request_review_comment_to_pending_review`, then `mcp__github__submit_pending_pull_request_review` with `event: APPROVE | REQUEST_CHANGES` and your summary body.
+            2. **No inline findings** (clean APPROVE with summary only): call `mcp__github__create_and_submit_pull_request_review` once with `event: APPROVE` and a body.
             The job's verify step will fail if no review is posted by `${{ steps.cfg.outputs.review_bot_login }}`, even if your analysis was sound — submission is part of the task, not optional.
 
             --- per-request context (variable; below this line changes every run) ---
@@ -255,21 +255,10 @@ jobs:
             ${{ github.event.pull_request.title }}
             </untrusted_data>
           claude_args: |
-            --allowedTools "mcp__github__get_pull_request" "mcp__github__pull_request_read" "mcp__github__list_pull_requests" "mcp__github__pull_request_review_write" "mcp__github__add_comment_to_pending_review" "mcp__github__get_file_contents" "Bash(gh pr view*)" "Bash(gh pr diff*)" "Bash(gh pr list*)" "Bash(gh pr checks*)" "Bash(gh api repos/*/pulls/*)" "Bash(gh api repos/*/issues/*/comments*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git blame*)" "Bash(git rev-parse*)" "Bash(git status*)" "Bash(git branch*)" "Read" "Grep" "Glob"
+            --allowedTools "mcp__github__get_pull_request" "mcp__github__get_pull_request_diff" "mcp__github__get_pull_request_files" "mcp__github__get_pull_request_reviews" "mcp__github__get_pull_request_review_comments" "mcp__github__create_pending_pull_request_review" "mcp__github__add_pull_request_review_comment_to_pending_review" "mcp__github__submit_pending_pull_request_review" "mcp__github__create_and_submit_pull_request_review" "mcp__github__get_file_contents" "Bash(gh pr view*)" "Bash(gh pr diff*)" "Bash(gh pr list*)" "Bash(gh pr checks*)" "Bash(gh api repos/*/pulls/*)" "Bash(gh api repos/*/issues/*/comments*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git blame*)" "Bash(git rev-parse*)" "Bash(git status*)" "Bash(git branch*)" "Read" "Grep" "Glob"
             --disallowedTools "Write" "Edit" "NotebookEdit" "WebFetch" "Bash(rm *)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push*)" "Bash(git commit*)" "Bash(git reset --hard*)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh auth*)" "Bash(gh api -X DELETE*)" "Bash(gh api -X POST*)" "Bash(gh api -X PUT*)" "Bash(gh api -X PATCH*)" "Bash(gh api --method DELETE*)" "Bash(gh api --method POST*)" "Bash(gh api --method PUT*)" "Bash(gh api --method PATCH*)" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
             --model ${{ steps.effort.outputs.model }}
             --max-turns ${{ steps.effort.outputs.max_turns }}
-
-      # TEMPORARY (W-170): capture per-turn tool calls so we can diagnose
-      # why claude isn't submitting reviews. Remove once W-170 is closed.
-      - name: Upload claude execution log (debug)
-        if: always() && steps.skip_check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: claude-execution-output-${{ env.PR }}-${{ env.TRACE }}
-          path: /home/runner/work/_temp/claude-execution-output.json
-          if-no-files-found: warn
-          retention-days: 7
 
       - name: Verify outcome
         if: always()
