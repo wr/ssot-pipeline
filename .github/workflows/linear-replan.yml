@@ -154,6 +154,7 @@ jobs:
           claude_args: |
             --mcp-config /tmp/mcp.json
             --max-turns 30
+            --model claude-sonnet-4-6
             --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "Read" "Grep" "Glob"
             --disallowedTools "Bash" "Write" "Edit" "WebFetch" "WebSearch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
 
