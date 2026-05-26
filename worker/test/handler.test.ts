@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   isStateTransition,
+  log,
   lookupRepo,
   matchesApprovalPhrase,
   resolveRepo,
@@ -48,6 +49,55 @@ afterEach(() => {
 });
 
 // --- Pure-function unit tests ------------------------------------------------
+
+describe("log helper (W-144 structured JSON)", () => {
+  // Cloudflare Logpush / `wrangler tail | jq` consumers will filter on these
+  // field names — pin them so silent renames break the test, not production
+  // alerting rules.
+  it("emits a single-line JSON object via console.log for info", () => {
+    const spy = (() => {
+      const captured: string[] = [];
+      const orig = console.log;
+      console.log = (...args: unknown[]) => {
+        captured.push(args.map(String).join(" "));
+      };
+      return { captured, restore: () => (console.log = orig) };
+    })();
+
+    try {
+      log("info", "dispatch_fired", { trace: "abc12345", repo: "wr/foo", event_type: "linear-pickup" });
+      expect(spy.captured.length).toBe(1);
+      const parsed = JSON.parse(spy.captured[0]!);
+      expect(parsed.level).toBe("info");
+      expect(parsed.event).toBe("dispatch_fired");
+      expect(parsed.trace).toBe("abc12345");
+      expect(parsed.repo).toBe("wr/foo");
+      expect(parsed.event_type).toBe("linear-pickup");
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("routes warn to console.warn and error to console.error", () => {
+    const captured: { warn: string[]; error: string[] } = { warn: [], error: [] };
+    const origW = console.warn;
+    const origE = console.error;
+    console.warn = (...args: unknown[]) => { captured.warn.push(args.map(String).join(" ")); };
+    console.error = (...args: unknown[]) => { captured.error.push(args.map(String).join(" ")); };
+
+    try {
+      log("warn", "dispatch_retry", { attempt: 2 });
+      log("error", "handler_error", { trace: "deadbeef", message: "boom" });
+      expect(captured.warn.length).toBe(1);
+      expect(captured.error.length).toBe(1);
+      expect(JSON.parse(captured.warn[0]!).event).toBe("dispatch_retry");
+      expect(JSON.parse(captured.error[0]!).message).toBe("boom");
+    } finally {
+      console.warn = origW;
+      console.error = origE;
+    }
+  });
+});
 
 describe("matchesApprovalPhrase", () => {
   it("matches a phrase with word boundaries and case-insensitively", () => {
