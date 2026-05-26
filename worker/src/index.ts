@@ -40,6 +40,50 @@ export default {
   },
 };
 
+// --- Handler helpers ---------------------------------------------------------
+//
+// Three patterns repeat across the issue / comment / reaction handlers.
+// Extracted here so future additions touch one place.
+
+// Resolve a Linear projectId to a configured GitHub repo, or null if either
+// the project is missing or has no mapping. Logs a contextual skip message
+// in either case using `label` (e.g. "issue W-42", "comment 0123…").
+function resolveRepo(projectId: string | undefined, label: string, trace: string): string | null {
+  if (!projectId) {
+    console.log(`trace=${trace} ${label}: no project, skipping`);
+    return null;
+  }
+  const repo = lookupRepo(projectId);
+  if (!repo) {
+    console.log(`trace=${trace} ${label}: no repo mapping for project ${projectId}`);
+    return null;
+  }
+  return repo;
+}
+
+// Decide whether an Issue.update event represents an actual state transition
+// (vs. a different field changing while the issue already sits in this state).
+// Returns true when the event should be processed, false when it should be
+// skipped (and logs the skip reason at the call site label).
+//
+// Defensive: when `updatedFrom` is absent entirely (null/undefined), we fire
+// anyway — better one extra plan than zero. We log it so any regressions in
+// Linear's webhook payload shape are visible. `create` events have no
+// `updatedFrom` and always count as a transition.
+function isStateTransition(event: LinearEvent, label: string, trace: string): boolean {
+  if (event.action !== "update") return true;
+  const uf = event.updatedFrom;
+  if (uf === undefined || uf === null) {
+    console.log(`trace=${trace} ${label}: update event missing updatedFrom — firing anyway`);
+    return true;
+  }
+  if (!("state" in uf) && !("stateId" in uf)) {
+    console.log(`trace=${trace} ${label}: update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
+    return false;
+  }
+  return true;
+}
+
 async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
   const body = await req.text();
   const signature = req.headers.get("Linear-Signature") ?? "";
@@ -115,34 +159,19 @@ async function verifySignature(
 async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): Promise<void> {
   const issue = event.data as LinearIssue;
   const stateName = issue.state?.name;
+  const issueProjectId = issue.projectId || issue.project?.id;
 
   if (stateName === config.todo_ai_state) {
     // Dedupe: only fire on the *transition into* Todo (AI), not on every update
     // while the issue sits there. Linear sends multiple events for a new issue
     // (create + updates as project/priority/etc. settle) — without this, each
     // one re-fires pickup and we get duplicate Plan comments.
-    if (event.action === "update") {
-      const uf = event.updatedFrom;
-      if (uf === undefined || uf === null) {
-        // Defensive: better one extra plan than zero. Log so regressions are visible.
-        console.log(`trace=${trace} issue ${issue.identifier}: update event missing updatedFrom — firing anyway`);
-      } else if (!("state" in uf) && !("stateId" in uf)) {
-        console.log(`trace=${trace} issue ${issue.identifier}: update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
-        return;
-      }
-    }
-
-    const projectId = issue.projectId || issue.project?.id;
-    if (!projectId) {
-      console.log(`trace=${trace} issue ${issue.identifier}: no project, skipping`);
+    if (!isStateTransition(event, `issue ${issue.identifier}`, trace)) {
       return;
     }
 
-    const repo = lookupRepo(projectId);
-    if (!repo) {
-      console.log(`trace=${trace} issue ${issue.identifier}: no repo mapping for project ${projectId}`);
-      return;
-    }
+    const repo = resolveRepo(issueProjectId, `issue ${issue.identifier}`, trace);
+    if (!repo) return;
 
     console.log(`trace=${trace} issue ${issue.identifier}: firing linear-pickup (action=${event.action})`);
     await fireDispatch(repo, "linear-pickup", { issue_id: issue.identifier, trace_id: trace }, env, trace);
@@ -162,25 +191,12 @@ async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): P
     }
 
     // Must be an actual state transition, not a different field update.
-    if (event.action === "update") {
-      const uf = event.updatedFrom;
-      if (uf !== undefined && uf !== null && !("state" in uf) && !("stateId" in uf)) {
-        console.log(`trace=${trace} issue ${issue.identifier}: In Progress update without state change (updatedFrom keys: ${Object.keys(uf).join(",") || "<empty>"}), skipping`);
-        return;
-      }
-    }
-
-    const projectId = issue.projectId || issue.project?.id;
-    if (!projectId) {
-      console.log(`trace=${trace} issue ${issue.identifier}: no project, skipping`);
+    if (!isStateTransition(event, `issue ${issue.identifier} (In Progress)`, trace)) {
       return;
     }
 
-    const repo = lookupRepo(projectId);
-    if (!repo) {
-      console.log(`trace=${trace} issue ${issue.identifier}: no repo mapping for project ${projectId}`);
-      return;
-    }
+    const repo = resolveRepo(issueProjectId, `issue ${issue.identifier}`, trace);
+    if (!repo) return;
 
     console.log(`trace=${trace} issue ${issue.identifier}: firing linear-implement (manual In Progress by actor ${event.actorId})`);
     await fireDispatch(repo, "linear-implement", { issue_id: issue.identifier, trace_id: trace }, env, trace);
@@ -214,11 +230,8 @@ async function handleReactionCreate(event: LinearEvent, env: Env, trace: string)
     return;
   }
 
-  const repo = lookupRepo(projectId);
-  if (!repo) {
-    console.log(`trace=${trace} reaction on issue ${issueId}: no repo mapping for project ${projectId}`);
-    return;
-  }
+  const repo = resolveRepo(projectId, `reaction on issue ${issueId}`, trace);
+  if (!repo) return;
 
   await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace }, env, trace);
 
@@ -262,11 +275,8 @@ async function handleCommentCreate(event: LinearEvent, env: Env, trace: string):
     return;
   }
 
-  const repo = lookupRepo(projectId);
-  if (!repo) {
-    console.log(`trace=${trace} Comment.create: no repo mapping for project ${projectId}`);
-    return;
-  }
+  const repo = resolveRepo(projectId, `Comment.create on issue ${issueId}`, trace);
+  if (!repo) return;
 
   const isApproval = (config.approval_phrases as string[]).some((phrase) => matchesApprovalPhrase(comment.body, phrase));
 
@@ -293,15 +303,18 @@ async function postReaction(
   trace: string,
 ): Promise<void> {
   const isComment = "commentId" in target;
-  const mutation = isComment
-    ? `mutation($id: String!, $emoji: String!) {
-        reactionCreate(input: { commentId: $id, emoji: $emoji }) { success }
-      }`
-    : `mutation($id: String!, $emoji: String!) {
-        reactionCreate(input: { issueId: $id, emoji: $emoji }) { success }
-      }`;
   const id = isComment ? target.commentId : target.issueId;
   const targetLabel = isComment ? `comment ${id}` : `issue ${id}`;
+
+  // Single mutation driven by a typed ReactionCreateInput — Linear's schema
+  // accepts either commentId or issueId on the same input type, so we don't
+  // need separate mutations for the two target shapes.
+  const mutation = `mutation($input: ReactionCreateInput!) {
+    reactionCreate(input: $input) { success }
+  }`;
+  const input: Record<string, string> = { emoji };
+  if (isComment) input.commentId = id;
+  else input.issueId = id;
 
   const resp = await fetch("https://api.linear.app/graphql", {
     method: "POST",
@@ -309,7 +322,7 @@ async function postReaction(
       Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ query: mutation, variables: { id, emoji } }),
+    body: JSON.stringify({ query: mutation, variables: { input } }),
     signal: AbortSignal.timeout(8000),
   });
 
