@@ -51,7 +51,19 @@ jobs:
             echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
             exit 1
           fi
-          CONFIG=$(curl -sS "$CONFIG_URL")
+          CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
+            echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
+            exit 1
+          }
+          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
+            echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
+            exit 1
+          fi
+          REVIEW_BOT_LOGIN=$(echo "$CONFIG" | jq -r '.review_bot_login // ""')
+          if [ -z "$REVIEW_BOT_LOGIN" ] || [ "$REVIEW_BOT_LOGIN" = "null" ]; then
+            echo "::error::review_bot_login is missing or null in pipeline config — aborting (would otherwise cause unbounded auto-fix loop)"
+            exit 1
+          fi
           {
             echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
             echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
@@ -60,7 +72,7 @@ jobs:
             echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
             echo "max_attempts=$(echo "$CONFIG" | jq -r '.pr_fix_max_attempts')"
             echo "branch_prefix=$(echo "$CONFIG" | jq -r '.branch_prefix')"
-            echo "review_bot_login=$(echo "$CONFIG" | jq -r '.review_bot_login')"
+            echo "review_bot_login=$REVIEW_BOT_LOGIN"
           } >> "$GITHUB_OUTPUT"
           # Allowed reviewers as a JSON array string — checked in the gate step.
           echo "fix_reviewer_logins=$(echo "$CONFIG" | jq -c '.fix_reviewer_logins')" >> "$GITHUB_OUTPUT"
@@ -87,14 +99,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAX: ${{ steps.cfg.outputs.max_attempts }}
+          REVIEW_BOT_LOGIN: ${{ steps.cfg.outputs.review_bot_login }}
         run: |
           set -euo pipefail
           # The triggering review is already in the API response, so a clean PR
           # on the very first REQUEST_CHANGES has count=1. We allow up to MAX
           # fix runs, so we bail when count > MAX (i.e. the (MAX+1)th request).
+          #
+          # --paginate without --jq merges all pages into a single array; we then
+          # apply the filter once via jq --arg so the bot login is passed as a
+          # variable (not interpolated as text into the filter string).
           COUNT=$(gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
-            --jq '[.[] | select(.user.login=="${{ steps.cfg.outputs.review_bot_login }}" and .state=="CHANGES_REQUESTED")] | length')
-          echo "${{ steps.cfg.outputs.review_bot_login }} REQUEST_CHANGES count on PR #${PR}: $COUNT (max=$MAX)"
+            | jq --arg u "$REVIEW_BOT_LOGIN" '[.[] | select(.user.login == $u and .state == "CHANGES_REQUESTED")] | length')
+          echo "${REVIEW_BOT_LOGIN} REQUEST_CHANGES count on PR #${PR}: $COUNT (max=$MAX)"
           if [ "$COUNT" -gt "$MAX" ]; then
             echo "exceeded=true" >> "$GITHUB_OUTPUT"
           else
@@ -145,9 +162,10 @@ jobs:
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
           COUNT: ${{ steps.cap.outputs.count }}
           MAX: ${{ steps.cfg.outputs.max_attempts }}
+          REVIEW_BOT_LOGIN: ${{ steps.cfg.outputs.review_bot_login }}
         run: |
           set -euo pipefail
-          BODY=$(printf '🛑 **Auto-fix cap reached** — ${{ steps.cfg.outputs.review_bot_login }} has requested changes %s times (max %s). Not dispatching another fix. Human intervention needed. _(trace: %s)_' "$COUNT" "$MAX" "$TRACE")
+          BODY=$(printf '🛑 **Auto-fix cap reached** — %s has requested changes %s times (max %s). Not dispatching another fix. Human intervention needed. _(trace: %s)_' "$REVIEW_BOT_LOGIN" "$COUNT" "$MAX" "$TRACE")
           gh pr comment "$PR" --repo "$REPO" --body "$BODY"
 
           if [ -z "${ISSUE:-}" ]; then
@@ -164,7 +182,7 @@ jobs:
           ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
-          LINEAR_BODY=$(printf '🛑 **Auto-fix cap reached on PR #%s** — ${{ steps.cfg.outputs.review_bot_login }} has requested changes %s times (max %s). Not dispatching another fix. _(trace: %s)_' "$PR" "$COUNT" "$MAX" "$TRACE")
+          LINEAR_BODY=$(printf '🛑 **Auto-fix cap reached on PR #%s** — %s has requested changes %s times (max %s). Not dispatching another fix. _(trace: %s)_' "$PR" "$REVIEW_BOT_LOGIN" "$COUNT" "$MAX" "$TRACE")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
 
@@ -275,7 +293,10 @@ jobs:
             --allowedTools mcp__linear__* mcp__github__* Bash Read Write Edit Grep Glob
 
       - name: Verify outcome
-        if: always() && steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
+        # Only run when gate explicitly succeeded (== 'false', not just != 'true'),
+        # so a cfg-step failure earlier doesn't lead the verify into git ops on
+        # an unset BEFORE_SHA.
+        if: always() && steps.gate.outputs.skip == 'false' && steps.cap.outputs.exceeded == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}

@@ -49,9 +49,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Detect this ssot-pipeline repo's own GitHub identity so forks install
-# the right `uses:` path when copying templates to target repos.
-SSOT_REPO=$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner --jq '.nameWithOwner')
+# SSOT_REPO is resolved lazily (after arg-parsing) so that --help / wrong-usage
+# invocations don't fail on `gh repo view` when the user isn't authed yet.
+SSOT_REPO=""
+resolve_ssot_repo() {
+  if [ -n "$SSOT_REPO" ]; then return 0; fi
+  if ! SSOT_REPO=$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>&1); then
+    echo "Error: couldn't detect this ssot-pipeline fork's GitHub identity." >&2
+    echo "       Ran: gh repo view (in $REPO_ROOT)" >&2
+    echo "       Output: $SSOT_REPO" >&2
+    echo "       Make sure you've run \`gh auth login\` and that $REPO_ROOT has a GitHub remote." >&2
+    exit 1
+  fi
+}
 
 # load_secret <NAME>
 # Resolve a credential by name in order: env var → macOS Keychain → prompt.
@@ -109,6 +119,10 @@ if [ ! -d "$TARGET_REPO_PATH" ]; then
   echo "Error: $TARGET_REPO_PATH is not a directory" >&2
   exit 1
 fi
+
+# Detect this ssot-pipeline fork's own GitHub identity so the generated
+# target-repo ssot.yml's `uses:` lines point at the right fork.
+resolve_ssot_repo
 
 cd "$TARGET_REPO_PATH"
 
@@ -280,29 +294,40 @@ set_secret CLAUDE_REVIEWER_APP_ID
 set_secret CLAUDE_REVIEWER_APP_KEY
 
 # --- Set SSOT_WORKER_URL as a repo variable (not a secret — it's a public endpoint) ---
+# Required. The reusable workflows hard-fail at runtime if this variable is
+# unset, so don't let init silently complete without it.
 SSOT_WORKER_URL="${SSOT_WORKER_URL:-}"
 if [ -z "$SSOT_WORKER_URL" ] && command -v security >/dev/null 2>&1; then
   SSOT_WORKER_URL=$(security find-generic-password -w -s ssot-pipeline -a SSOT_WORKER_URL 2>/dev/null || true)
   [ -n "$SSOT_WORKER_URL" ] && echo "→ Loaded SSOT_WORKER_URL from Keychain" >&2
 fi
-if [ -z "$SSOT_WORKER_URL" ]; then
-  echo -n "SSOT_WORKER_URL (e.g. https://<name>.workers.dev/config): " >&2
+while [ -z "$SSOT_WORKER_URL" ]; do
+  echo -n "SSOT_WORKER_URL (must end in /config, e.g. https://<name>.<account>.workers.dev/config): " >&2
   read -r SSOT_WORKER_URL
+  if [ -z "$SSOT_WORKER_URL" ]; then
+    echo "  Required — every reusable workflow fetches config from this URL." >&2
+  fi
+done
+if ! [[ "$SSOT_WORKER_URL" =~ ^https?://.+/config$ ]]; then
+  echo "::warning::SSOT_WORKER_URL '$SSOT_WORKER_URL' doesn't look like a valid Worker config endpoint (https://.../config)." >&2
+  echo -n "Use it anyway? [y/N]: " >&2
+  read -r confirm
+  [[ "$confirm" =~ ^[Yy] ]] || { echo "Aborted." >&2; exit 1; }
 fi
-if [ -n "$SSOT_WORKER_URL" ]; then
-  gh variable set SSOT_WORKER_URL --repo "$REPO_FULL" --body "$SSOT_WORKER_URL"
-  echo "→ Set variable SSOT_WORKER_URL on $REPO_FULL"
-else
-  echo "→ SSOT_WORKER_URL empty — skipping (set it manually: gh variable set SSOT_WORKER_URL --repo $REPO_FULL)"
-fi
+gh variable set SSOT_WORKER_URL --repo "$REPO_FULL" --body "$SSOT_WORKER_URL"
+echo "→ Set variable SSOT_WORKER_URL on $REPO_FULL"
 
 # --- Install stub workflow in target repo ---
 mkdir -p .github/workflows
-sed "s|wr/ssot-pipeline|$SSOT_REPO|g" "$REPO_ROOT/templates/ssot.yml" > .github/workflows/ssot.yml
+sed "s|__SSOT_REPO__|$SSOT_REPO|g" "$REPO_ROOT/templates/ssot.yml" > .github/workflows/ssot.yml
 echo "→ Installed .github/workflows/ssot.yml (uses: $SSOT_REPO)"
 
 # --- Update CLAUDE.md in target repo ---
-BRANCH_PREFIX=$(jq -r '.branch_prefix' "$REPO_ROOT/config/pipeline.json")
+BRANCH_PREFIX=$(jq -r '.branch_prefix // ""' "$REPO_ROOT/config/pipeline.json")
+if [ -z "$BRANCH_PREFIX" ] || [ "$BRANCH_PREFIX" = "null" ]; then
+  echo "Error: branch_prefix missing from $REPO_ROOT/config/pipeline.json — set it before re-running." >&2
+  exit 1
+fi
 SSOT_BLOCK=$(cat <<EOF
 
 ## Source of truth
