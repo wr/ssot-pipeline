@@ -49,31 +49,41 @@ cd worker
 npx wrangler deploy
 ```
 
-Note your Worker URL: `https://<your-name>.workers.dev`. You'll need it in the next steps.
+The deploy output prints your Worker URL — it will look like `https://<wrangler-name>.<your-cf-account>.workers.dev`. You'll need it in the next steps. The config endpoint is `<that-URL>/config`.
 
-Set Worker secrets:
+Set the two Worker secrets you have right now (the third — `LINEAR_WEBHOOK_SECRET` — comes from step 7):
 
 ```bash
 wrangler secret put LINEAR_APP_TOKEN       # from docs/linear-app-setup.md step 2
-wrangler secret put LINEAR_WEBHOOK_SECRET  # from the Linear webhook settings
 wrangler secret put GITHUB_DISPATCH_TOKEN  # fine-grained PAT — see docs/github-app-setup.md section 2
 ```
 
-## 6. Set `SSOT_WORKER_URL` as a Keychain entry (recommended)
+## 6. Set `SSOT_WORKER_URL` on your fork (and in Keychain)
 
-`init-target-repo.sh` reads `SSOT_WORKER_URL` from env, Keychain, or prompts. Seed it once:
+Your fork's own `.github/workflows/ssot.yml` (the dogfood caller for the meta-repo) reads `vars.SSOT_WORKER_URL`. Set it on the fork:
+
+```bash
+gh variable set SSOT_WORKER_URL --repo <your-github-login>/ssot-pipeline \
+  --body 'https://<wrangler-name>.<your-cf-account>.workers.dev/config'
+```
+
+Also seed your local Keychain so `init-target-repo.sh` doesn't prompt every time it wires up a new target repo:
 
 ```bash
 security add-generic-password -U -s ssot-pipeline -a SSOT_WORKER_URL \
-  -w 'https://<your-name>.workers.dev/config'
+  -w 'https://<wrangler-name>.<your-cf-account>.workers.dev/config'
 ```
 
 ## 7. Configure the Linear webhook
 
 1. In your fork's Linear workspace: Settings → API → Applications → edit your `claude` app
-2. Set **Webhook URL** to: `https://<your-name>.workers.dev/linear`
-3. Subscribe to: `Issue`, `Reaction`
-4. Note the signing secret → `wrangler secret put LINEAR_WEBHOOK_SECRET`
+2. Set **Webhook URL** to: `https://<wrangler-name>.<your-cf-account>.workers.dev/linear`
+3. Subscribe to: `Issue`, `Reaction`, `Comment`
+4. Copy the signing secret Linear shows you, then set it on the Worker:
+
+   ```bash
+   wrangler secret put LINEAR_WEBHOOK_SECRET
+   ```
 
 See [`docs/linear-app-setup.md`](./linear-app-setup.md) for full Linear OAuth app setup.
 
