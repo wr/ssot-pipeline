@@ -7,3 +7,13 @@ compatibility_date = "2026-05-01"
 #   LINEAR_WEBHOOK_SECRET    HMAC secret from Linear webhook config
 #   LINEAR_APP_TOKEN         OAuth app token (actor=app) for Linear GraphQL queries
 #   GITHUB_DISPATCH_TOKEN    Fine-grained PAT with Contents:write + Actions:write
+
+# Durable Object: persistent webhook dedup keyed by Linear-Delivery-Id.
+# See worker/src/dedup-do.ts for the implementation and W-137 for context.
+[[durable_objects.bindings]]
+name = "DEDUP"
+class_name = "DedupDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["DedupDO"]
