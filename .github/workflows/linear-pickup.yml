@@ -137,6 +137,7 @@ jobs:
 
       - uses: anthropics/claude-code-action@v1
         if: env.ALREADY_PLANNED != '1'
+        id: claude
         env:
           MAX_THINKING_TOKENS: '10000'
         with:
@@ -167,6 +168,16 @@ jobs:
 
             5. Set the issue state to "${{ steps.cfg.outputs.plan_review_state }}" via mcp__linear__save_issue.
 
+            6. As your FINAL output (after all tool calls), return a JSON object matching this schema:
+               {
+                 "plan_posted": boolean,        // true if you successfully posted the plan comment in step 4
+                 "state_set": boolean,          // true if you successfully set the issue state in step 5
+                 "plan_summary": string,        // one-sentence summary of the approach (max ~200 chars)
+                 "ambiguities": string[],       // list of unresolved questions / things you had to assume; [] if none
+                 "complexity": "S" | "M" | "L"  // your estimate: S=trivial, M=normal, L=large/risky
+               }
+               The action validates this against a JSON schema; downstream steps consume it via structured_output. Be honest — `plan_posted: false` is better than lying.
+
             Do not open PRs, do not commit code, do not @-mention. Just plan and comment.
           claude_args: |
             --mcp-config /tmp/mcp.json
@@ -174,6 +185,7 @@ jobs:
             --model claude-sonnet-4-6
             --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "Read" "Grep" "Glob"
             --disallowedTools "Bash" "Write" "Edit" "WebFetch" "WebSearch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
+            --json-schema '{"type":"object","additionalProperties":false,"required":["plan_posted","state_set","plan_summary","ambiguities","complexity"],"properties":{"plan_posted":{"type":"boolean"},"state_set":{"type":"boolean"},"plan_summary":{"type":"string","maxLength":500},"ambiguities":{"type":"array","items":{"type":"string"},"maxItems":20},"complexity":{"type":"string","enum":["S","M","L"]}}}'
 
       - name: Verify outcome
         if: always()
@@ -182,6 +194,7 @@ jobs:
           PLAN_MARKER: ${{ steps.cfg.outputs.plan_marker }}
           EXPECT_STATE: ${{ steps.cfg.outputs.plan_review_state }}
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
         run: |
           set -euo pipefail
           if [ -z "${EXPECT_STATE:-}" ]; then
@@ -206,14 +219,38 @@ jobs:
           MARKER_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
-          echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE plan_comments=$MARKER_COUNT"
+          # Prefer Claude's structured_output (authoritative: what Claude says it did).
+          # Fall back to the descriptive marker/state check (what the world looks like).
+          # If structured_output is missing/empty/invalid, we silently fall through to the legacy check.
+          SO_PLAN_POSTED=""
+          SO_STATE_SET=""
+          if [ -n "${STRUCTURED_OUTPUT:-}" ] && echo "$STRUCTURED_OUTPUT" | jq -e . >/dev/null 2>&1; then
+            SO_PLAN_POSTED=$(echo "$STRUCTURED_OUTPUT" | jq -r '.plan_posted // empty')
+            SO_STATE_SET=$(echo "$STRUCTURED_OUTPUT" | jq -r '.state_set // empty')
+            SO_SUMMARY=$(echo "$STRUCTURED_OUTPUT" | jq -r '.plan_summary // empty')
+            SO_COMPLEXITY=$(echo "$STRUCTURED_OUTPUT" | jq -r '.complexity // empty')
+            SO_AMBIG_COUNT=$(echo "$STRUCTURED_OUTPUT" | jq -r '.ambiguities | length' 2>/dev/null || echo 0)
+            echo "structured_output: plan_posted=$SO_PLAN_POSTED state_set=$SO_STATE_SET complexity=$SO_COMPLEXITY ambiguities=$SO_AMBIG_COUNT"
+            echo "summary: $SO_SUMMARY"
+          else
+            echo "structured_output not present — falling back to marker/state grep"
+          fi
 
-          if [ "$STATE" = "$EXPECT_STATE" ] && [ "$MARKER_COUNT" -gt 0 ]; then
-            echo "✓ verification passed"
+          echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE plan_comments=$MARKER_COUNT structured(plan_posted=$SO_PLAN_POSTED state_set=$SO_STATE_SET)"
+
+          # Authoritative path: structured output says both succeeded AND the world agrees on state.
+          if [ "$SO_PLAN_POSTED" = "true" ] && [ "$SO_STATE_SET" = "true" ] && [ "$STATE" = "$EXPECT_STATE" ]; then
+            echo "✓ verification passed (structured_output + state cross-check)"
             exit 0
           fi
 
-          echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$MARKER_COUNT"
+          # Fallback path (no structured output yet, or partial): legacy marker + state check.
+          if [ "$STATE" = "$EXPECT_STATE" ] && [ "$MARKER_COUNT" -gt 0 ]; then
+            echo "✓ verification passed (marker fallback)"
+            exit 0
+          fi
+
+          echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$MARKER_COUNT, structured(plan_posted='$SO_PLAN_POSTED' state_set='$SO_STATE_SET')"
 
           BODY=$(printf '❌ **Pickup failed verification** — _(trace: %s)_\n\nClaude finished without leaving the issue in the expected state.\n\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments found: %d\n\n[Workflow run](%s/%s/actions/runs/%s)' \
             "$TRACE" "$EXPECT_STATE" "$STATE" "$MARKER_COUNT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")
