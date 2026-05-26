@@ -93,26 +93,19 @@ jobs:
       - name: Fetch pipeline config
         if: steps.skip_check.outputs.skip != 'true'
         id: cfg
+        uses: ./.github/actions/fetch-pipeline-config
+        with:
+          config_url: ${{ env.CONFIG_URL }}
+
+      - name: Validate review_bot_login present
+        if: steps.skip_check.outputs.skip != 'true'
+        env:
+          REVIEW_BOT_LOGIN: ${{ steps.cfg.outputs.review_bot_login }}
         run: |
-          set -euo pipefail
-          if [ -z "${CONFIG_URL:-}" ]; then
-            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
-            exit 1
-          fi
-          CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
-            echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
-            exit 1
-          }
-          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
-            echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
-            exit 1
-          fi
-          REVIEW_BOT_LOGIN=$(echo "$CONFIG" | jq -r '.review_bot_login // ""')
-          if [ -z "$REVIEW_BOT_LOGIN" ] || [ "$REVIEW_BOT_LOGIN" = "null" ]; then
+          if [ -z "${REVIEW_BOT_LOGIN:-}" ] || [ "$REVIEW_BOT_LOGIN" = "null" ]; then
             echo "::error::review_bot_login is missing or null in pipeline config"
             exit 1
           fi
-          echo "review_bot_login=$REVIEW_BOT_LOGIN" >> "$GITHUB_OUTPUT"
 
       - name: Resolve effort settings
         if: steps.skip_check.outputs.skip != 'true'

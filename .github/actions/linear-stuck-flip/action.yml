@@ -1,0 +1,175 @@
+# Posts a structured `## 🚨 Stuck context — trace <id>` comment on the
+# Linear issue and flips the issue state to Stuck. Centralizes the
+# Linear GraphQL boilerplate shared by linear-pickup, linear-implement,
+# linear-replan, and pr-fix's verify / bail-if-cap steps.
+#
+# Why only the comment + state-flip atom (not the full verify): each
+# workflow has its own failure-detection logic (structured_output parse,
+# no-fix-needed marker check, head-ref / Closes-trailer assertions,
+# auto-replan branching). Those orchestrations stay inline. This action
+# does ONLY the two side effects every Stuck path needs: post the
+# structured breadcrumb comment, flip state. Callers build the
+# `body_md` themselves so each workflow can include its own
+# "what failed" payload.
+#
+# Two convenience shortcuts:
+#  - `body_md` can be omitted if `workflow`, `failure_shapes`, and
+#    `what_failed_md` are all provided. The action then constructs the
+#    standard "## 🚨 Stuck context — trace ..." body with the same
+#    layout used across the four call sites today.
+#  - `issue_uuid` and `stuck_uuid` are optional — if absent the action
+#    looks them up via a single Linear query. Pass them if the caller
+#    already resolved them (saves a round-trip).
+#
+# The action exits 0 even if the Stuck state doesn't exist in the team
+# (matches today's behavior: a `::warning::` is printed and the run
+# continues). The caller decides whether the overall step exits 1.
+name: Linear stuck-flip
+description: 'Post a structured Stuck-context comment on a Linear issue and flip it to Stuck.'
+
+inputs:
+  linear_token:
+    description: 'Linear OAuth app token (LINEAR_APP_TOKEN secret).'
+    required: true
+  issue:
+    description: 'Linear issue identifier (e.g. W-148). Used for the lookup query if issue_uuid is empty.'
+    required: true
+  issue_uuid:
+    description: 'Linear issue UUID. Optional — looked up if empty.'
+    required: false
+    default: ''
+  stuck_state:
+    description: 'Name of the Stuck workflow state (typically from fetch-pipeline-config outputs.stuck_state).'
+    required: true
+  stuck_uuid:
+    description: 'Stuck state UUID. Optional — looked up if empty.'
+    required: false
+    default: ''
+  trace:
+    description: 'Trace ID for log correlation.'
+    required: true
+  workflow:
+    description: 'Workflow name for the structured body (e.g. `linear-pickup`). Required unless `body_md` is set.'
+    required: false
+    default: ''
+  run_url:
+    description: 'GitHub Actions run URL. Required unless `body_md` is set.'
+    required: false
+    default: ''
+  failure_shapes:
+    description: 'Comma-separated failure-shape tags (e.g. `state_mismatch, no_pr_attached`). Required unless `body_md` is set.'
+    required: false
+    default: ''
+  what_failed_md:
+    description: 'Markdown body for the "What failed" section. Required unless `body_md` is set.'
+    required: false
+    default: ''
+  extra_header_md:
+    description: 'Optional extra markdown to splice between Failure shapes and Next action (e.g. "**PR:** #123\n**Prior auto-retries:** 0 / 2").'
+    required: false
+    default: ''
+  next_action_md:
+    description: 'Optional override for the "Next action" line. Defaults to "flipping to Stuck — human needs to look".'
+    required: false
+    default: 'flipping to Stuck — human needs to look'
+  body_md:
+    description: 'Full pre-rendered comment body. If set, the workflow/run_url/failure_shapes/what_failed_md/extra_header_md/next_action_md inputs are ignored.'
+    required: false
+    default: ''
+  flip_state:
+    description: 'Whether to flip the issue to Stuck after posting the comment. Set to "false" when the caller wants to post the breadcrumb but defer the state transition (e.g. linear-implement, which may auto-dispatch linear-replan instead of going Stuck).'
+    required: false
+    default: 'true'
+
+outputs:
+  comment_id:
+    description: 'ID of the Stuck-context comment that was posted (empty if the post failed).'
+    value: ${{ steps.stuck.outputs.comment_id }}
+  stuck_flipped:
+    description: '`true` if the issue was flipped to Stuck; `false` if the Stuck state UUID was not found.'
+    value: ${{ steps.stuck.outputs.stuck_flipped }}
+
+runs:
+  using: composite
+  steps:
+    - id: stuck
+      shell: bash
+      env:
+        LINEAR_APP_TOKEN: ${{ inputs.linear_token }}
+        ISSUE: ${{ inputs.issue }}
+        ISSUE_UUID_IN: ${{ inputs.issue_uuid }}
+        STUCK_STATE: ${{ inputs.stuck_state }}
+        STUCK_UUID_IN: ${{ inputs.stuck_uuid }}
+        TRACE: ${{ inputs.trace }}
+        WF: ${{ inputs.workflow }}
+        RUN_URL: ${{ inputs.run_url }}
+        FAIL_SHAPES: ${{ inputs.failure_shapes }}
+        WHAT_FAILED: ${{ inputs.what_failed_md }}
+        EXTRA_HEADER: ${{ inputs.extra_header_md }}
+        NEXT_ACTION: ${{ inputs.next_action_md }}
+        BODY_IN: ${{ inputs.body_md }}
+        FLIP_STATE: ${{ inputs.flip_state }}
+      run: |
+        set -euo pipefail
+        GQL_URL=https://api.linear.app/graphql
+        AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+        CT="Content-Type: application/json"
+
+        ISSUE_UUID="${ISSUE_UUID_IN}"
+        STUCK_UUID="${STUCK_UUID_IN}"
+
+        # Look up issue UUID and stuck UUID if either is missing.
+        if [ -z "$ISSUE_UUID" ] || [ -z "$STUCK_UUID" ]; then
+          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
+          [ -z "$ISSUE_UUID" ] && ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id // empty')
+          [ -z "$STUCK_UUID" ] && STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+        fi
+
+        if [ -z "$ISSUE_UUID" ]; then
+          echo "::error::linear-stuck-flip: could not resolve issue UUID for $ISSUE — skipping"
+          {
+            echo "comment_id="
+            echo "stuck_flipped=false"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Compose body if not supplied.
+        if [ -n "$BODY_IN" ]; then
+          BODY="$BODY_IN"
+        else
+          if [ -z "$WF" ] || [ -z "$RUN_URL" ] || [ -z "$FAIL_SHAPES" ] || [ -z "$WHAT_FAILED" ]; then
+            echo "::error::linear-stuck-flip: must provide either body_md OR all of (workflow, run_url, failure_shapes, what_failed_md)"
+            exit 1
+          fi
+          if [ -n "$EXTRA_HEADER" ]; then
+            BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `%s` ([run](%s))\n**Failure shapes:** `%s`\n%s\n**Next action:** %s\n\n### What failed\n%b\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
+              "$TRACE" "$WF" "$RUN_URL" "$FAIL_SHAPES" "$EXTRA_HEADER" "$NEXT_ACTION" "$WHAT_FAILED")
+          else
+            BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `%s` ([run](%s))\n**Failure shapes:** `%s`\n**Next action:** %s\n\n### What failed\n%b\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
+              "$TRACE" "$WF" "$RUN_URL" "$FAIL_SHAPES" "$NEXT_ACTION" "$WHAT_FAILED")
+          fi
+        fi
+
+        POST_RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+          -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success comment{id}}}",variables:{id:$id,body:$body}}')")
+        STUCK_COMMENT_ID=$(echo "$POST_RESP" | jq -r '.data.commentCreate.comment.id // empty')
+        echo "trace=${TRACE} posted Stuck-context comment id=${STUCK_COMMENT_ID:-<none>}"
+
+        STUCK_FLIPPED=false
+        if [ "$FLIP_STATE" != "true" ]; then
+          echo "trace=${TRACE} flip_state=false — comment posted but skipping state transition"
+        elif [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+          echo "trace=${TRACE} flipped $ISSUE to Stuck"
+          STUCK_FLIPPED=true
+        else
+          echo "::warning::Stuck state '$STUCK_STATE' does not exist in this team — skipping state change. Create it in Linear team settings."
+        fi
+
+        {
+          echo "comment_id=${STUCK_COMMENT_ID}"
+          echo "stuck_flipped=${STUCK_FLIPPED}"
+        } >> "$GITHUB_OUTPUT"

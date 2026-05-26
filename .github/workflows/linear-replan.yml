@@ -40,28 +40,9 @@ jobs:
 
       - name: Fetch pipeline config
         id: cfg
-        run: |
-          set -euo pipefail
-          if [ -z "${CONFIG_URL:-}" ]; then
-            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
-            exit 1
-          fi
-          CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
-            echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
-            exit 1
-          }
-          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
-            echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
-            exit 1
-          fi
-          {
-            echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker')"
-            echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
-            echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
-            echo "plan_review_state=$(echo "$CONFIG" | jq -r '.plan_review_state')"
-            echo "planning_state=$(echo "$CONFIG" | jq -r '.planning_state')"
-            echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
-          } >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/fetch-pipeline-config
+        with:
+          config_url: ${{ env.CONFIG_URL }}
 
       - name: Set issue to Planning state
         env:
@@ -114,24 +95,11 @@ jobs:
           echo "trace=${TRACE} posted starting comment for $ISSUE"
 
       - name: Write MCP config
-        env:
-          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
-          MCP_URL: ${{ steps.cfg.outputs.mcp_url }}
-          MCP_TRANSPORT: ${{ steps.cfg.outputs.mcp_transport }}
-        run: |
-          cat > /tmp/mcp.json <<EOF
-          {
-            "mcpServers": {
-              "linear": {
-                "type": "${MCP_TRANSPORT}",
-                "url": "${MCP_URL}",
-                "headers": {
-                  "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
-                }
-              }
-            }
-          }
-          EOF
+        uses: ./.github/actions/write-mcp-config
+        with:
+          mcp_url: ${{ steps.cfg.outputs.mcp_url }}
+          mcp_transport: ${{ steps.cfg.outputs.mcp_transport }}
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
 
       - uses: anthropics/claude-code-action@v1
         env:
@@ -174,6 +142,7 @@ jobs:
             --disallowedTools "Bash" "Write" "Edit" "WebFetch" "WebSearch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
 
       - name: Verify outcome
+        id: verify
         if: always()
         env:
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
@@ -184,6 +153,7 @@ jobs:
           set -euo pipefail
           if [ -z "${EXPECT_STATE:-}" ]; then
             echo "::warning::No config available, skipping verification"
+            echo "needs_stuck=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -204,25 +174,38 @@ jobs:
 
           if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PLAN_COUNT" -gt "${PLAN_COUNT_BEFORE:-0}" ]; then
             echo "✓ verification passed"
+            echo "needs_stuck=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "::error::Verification failed — state='$STATE' (expected '$EXPECT_STATE'), plan_comments=$PLAN_COUNT (before=${PLAN_COUNT_BEFORE:-0})"
 
-          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          # Structured Stuck-context comment (matches the format from
-          # linear-implement / pr-fix so future readers can grep one prefix).
-          BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `linear-replan` ([run](%s))\n**Failure shapes:** `replan_no_plan_posted`\n**Next action:** flipping to Stuck — human needs to look\n\n### What failed\n- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments before: %d\n- Plan comments after: %d\n- Claude finished without posting a new plan or leaving the issue in the expected state.\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
-            "$TRACE" "$RUN_URL" "$EXPECT_STATE" "$STATE" "${PLAN_COUNT_BEFORE:-0}" "$PLAN_COUNT")
-          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+          WHAT_FAILED=$(printf -- '- Expected state: `%s`\n- Actual state: `%s`\n- Plan comments before: %d\n- Plan comments after: %d\n- Claude finished without posting a new plan or leaving the issue in the expected state.' \
+            "$EXPECT_STATE" "$STATE" "${PLAN_COUNT_BEFORE:-0}" "$PLAN_COUNT")
+          {
+            echo "needs_stuck=true"
+            echo "issue_uuid=${ISSUE_UUID}"
+            echo "stuck_uuid=${STUCK_UUID}"
+            echo "what_failed<<EOF"
+            echo "$WHAT_FAILED"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-          if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
-            curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
-            echo "Moved to Stuck state"
-          else
-            echo "::warning::Stuck state '$STUCK_STATE' does not exist in this team — skipping state change."
-          fi
+      - name: Stuck-flip on verify failure
+        if: always() && steps.verify.outputs.needs_stuck == 'true'
+        uses: ./.github/actions/linear-stuck-flip
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          issue: ${{ env.ISSUE }}
+          issue_uuid: ${{ steps.verify.outputs.issue_uuid }}
+          stuck_state: ${{ steps.cfg.outputs.stuck_state }}
+          stuck_uuid: ${{ steps.verify.outputs.stuck_uuid }}
+          trace: ${{ env.TRACE }}
+          workflow: linear-replan
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          failure_shapes: replan_no_plan_posted
+          what_failed_md: ${{ steps.verify.outputs.what_failed }}
 
-          exit 1
+      - name: Exit non-zero if verify failed
+        if: always() && steps.verify.outputs.needs_stuck == 'true'
+        run: exit 1
