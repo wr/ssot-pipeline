@@ -23,9 +23,9 @@ Before deploying a fork, update `config/pipeline.json` with your own values — 
 | `branch_prefix` | Your preferred branch prefix, e.g. `yourname/` |
 | `review_bot_login` | `<your-handle>-claude-reviewer[bot]` — the GitHub App you create for reviews |
 | `fix_reviewer_logins` | `["<your-handle>-claude-reviewer[bot]"]` — same App, plus your own GitHub login if you want human reviews to trigger auto-fix too |
-| `approval_emojis` | Emojis that count as plan approval (default `["👍", "+1"]`) |
-| `approval_phrases` | Comment phrases that count as approval (default `["+1", "approved"]`) |
-| `approval_ack_emoji` | Emoji the Worker adds as acknowledgement (default `"🚀"`) |
+| `approval_emojis` | Linear emoji names that count as plan approval via reaction (default `["+1", "white_check_mark"]`) |
+| `approval_phrases` | Comment phrases/emoji that count as approval when replied to a plan (default `["ship it", "lgtm", "looks good", "approved", "go for it", "👍", "✅"]`) |
+| `approval_ack_emoji` | Linear emoji name the Worker uses as 🤖 read-receipt (default `"robot_face"`) |
 | `project_to_repo` | Clear this — `init-target-repo.sh` populates it per project |
 
 Then: deploy the Worker, set secrets, and run `init-target-repo.sh` for each target repo. Full walkthrough: [`docs/fork-setup.md`](./docs/fork-setup.md).

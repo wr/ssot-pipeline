@@ -22,6 +22,8 @@ jobs:
   linear-pickup:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'linear-pickup'
     uses: ./.github/workflows/linear-pickup.yml
+    with:
+      config_url: ${{ vars.SSOT_WORKER_URL }}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
@@ -29,6 +31,8 @@ jobs:
   linear-implement:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'linear-implement'
     uses: ./.github/workflows/linear-implement.yml
+    with:
+      config_url: ${{ vars.SSOT_WORKER_URL }}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
@@ -36,6 +40,8 @@ jobs:
   linear-replan:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'linear-replan'
     uses: ./.github/workflows/linear-replan.yml
+    with:
+      config_url: ${{ vars.SSOT_WORKER_URL }}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
@@ -43,6 +49,8 @@ jobs:
   pr-review:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/pr-review.yml
+    with:
+      config_url: ${{ vars.SSOT_WORKER_URL }}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       CLAUDE_REVIEWER_APP_ID: ${{ secrets.CLAUDE_REVIEWER_APP_ID }}
@@ -51,6 +59,8 @@ jobs:
   pr-fix:
     if: github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested'
     uses: ./.github/workflows/pr-fix.yml
+    with:
+      config_url: ${{ vars.SSOT_WORKER_URL }}
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
