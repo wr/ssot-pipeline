@@ -1,0 +1,54 @@
+# Writes the Linear MCP server config to /tmp/mcp.json for
+# claude-code-action's `--mcp-config` arg. Replaces the identical
+# ~14-line heredoc duplicated across linear-pickup / linear-implement /
+# linear-replan / pr-fix.
+#
+# `linear_token` is the Linear OAuth app token (LINEAR_APP_TOKEN secret).
+# Pass it via input so this composite stays decoupled from the caller's
+# secret naming.
+name: Write MCP config
+description: 'Write the Linear MCP server config to a temp file for claude-code-action.'
+
+inputs:
+  mcp_url:
+    description: 'Linear MCP URL (from fetch-pipeline-config outputs.mcp_url).'
+    required: true
+  mcp_transport:
+    description: 'Linear MCP transport (from fetch-pipeline-config outputs.mcp_transport).'
+    required: true
+  linear_token:
+    description: 'Linear OAuth app token (LINEAR_APP_TOKEN secret).'
+    required: true
+  path:
+    description: 'Where to write the MCP config. Default /tmp/mcp.json matches every caller today.'
+    required: false
+    default: '/tmp/mcp.json'
+
+outputs:
+  path:
+    description: 'Path of the written MCP config file (echoes the `path` input).'
+    value: ${{ inputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        MCP_URL: ${{ inputs.mcp_url }}
+        MCP_TRANSPORT: ${{ inputs.mcp_transport }}
+        LINEAR_APP_TOKEN: ${{ inputs.linear_token }}
+        MCP_PATH: ${{ inputs.path }}
+      run: |
+        cat > "$MCP_PATH" <<EOF
+        {
+          "mcpServers": {
+            "linear": {
+              "type": "${MCP_TRANSPORT}",
+              "url": "${MCP_URL}",
+              "headers": {
+                "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
+              }
+            }
+          }
+        }
+        EOF

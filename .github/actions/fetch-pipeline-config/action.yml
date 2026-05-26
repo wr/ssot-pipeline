@@ -1,0 +1,94 @@
+# Fetches /config from the SSOT Worker, validates it's JSON, exposes the
+# well-known config keys as step outputs. Replaces the ~25-line block
+# duplicated across linear-pickup / linear-implement / linear-replan /
+# pr-review / pr-fix. Workflows reference only the outputs they need.
+#
+# Why a composite vs. a bash helper script: composite actions are
+# discoverable in the workflow YAML, work without checking out `bin/`,
+# and let GitHub render the step name in the run log.
+#
+# All outputs are emitted unconditionally — if a key isn't in the JSON,
+# jq returns the empty string for `// ""` so the output is empty (callers
+# can then guard with their own null check, as pr-review does for
+# `review_bot_login`).
+name: Fetch pipeline config
+description: 'Curl the SSOT Worker /config endpoint, validate JSON, expose values as outputs.'
+
+inputs:
+  config_url:
+    description: 'Pipeline config Worker URL (typically inputs.config_url on the reusable workflow).'
+    required: true
+
+outputs:
+  plan_marker:
+    description: 'plan_marker'
+    value: ${{ steps.fetch.outputs.plan_marker }}
+  mcp_url:
+    description: 'linear_mcp_url'
+    value: ${{ steps.fetch.outputs.mcp_url }}
+  mcp_transport:
+    description: 'linear_mcp_transport'
+    value: ${{ steps.fetch.outputs.mcp_transport }}
+  planning_state:
+    description: 'planning_state'
+    value: ${{ steps.fetch.outputs.planning_state }}
+  plan_review_state:
+    description: 'plan_review_state'
+    value: ${{ steps.fetch.outputs.plan_review_state }}
+  in_progress_state:
+    description: 'in_progress_state'
+    value: ${{ steps.fetch.outputs.in_progress_state }}
+  in_review_state:
+    description: 'in_review_state'
+    value: ${{ steps.fetch.outputs.in_review_state }}
+  stuck_state:
+    description: 'stuck_state'
+    value: ${{ steps.fetch.outputs.stuck_state }}
+  branch_prefix:
+    description: 'branch_prefix'
+    value: ${{ steps.fetch.outputs.branch_prefix }}
+  review_bot_login:
+    description: 'review_bot_login'
+    value: ${{ steps.fetch.outputs.review_bot_login }}
+  max_attempts:
+    description: 'pr_fix_max_attempts'
+    value: ${{ steps.fetch.outputs.max_attempts }}
+  fix_reviewer_logins:
+    description: 'fix_reviewer_logins (JSON array, compact)'
+    value: ${{ steps.fetch.outputs.fix_reviewer_logins }}
+
+runs:
+  using: composite
+  steps:
+    - id: fetch
+      shell: bash
+      env:
+        CONFIG_URL: ${{ inputs.config_url }}
+      run: |
+        set -euo pipefail
+        if [ -z "${CONFIG_URL:-}" ]; then
+          echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
+          exit 1
+        fi
+        CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
+          echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
+          exit 1
+        }
+        if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
+          echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
+          exit 1
+        fi
+        {
+          echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker // ""')"
+          echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url // ""')"
+          echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport // ""')"
+          echo "planning_state=$(echo "$CONFIG" | jq -r '.planning_state // ""')"
+          echo "plan_review_state=$(echo "$CONFIG" | jq -r '.plan_review_state // ""')"
+          echo "in_progress_state=$(echo "$CONFIG" | jq -r '.in_progress_state // ""')"
+          echo "in_review_state=$(echo "$CONFIG" | jq -r '.in_review_state // ""')"
+          echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state // ""')"
+          echo "branch_prefix=$(echo "$CONFIG" | jq -r '.branch_prefix // ""')"
+          echo "review_bot_login=$(echo "$CONFIG" | jq -r '.review_bot_login // ""')"
+          echo "max_attempts=$(echo "$CONFIG" | jq -r '.pr_fix_max_attempts // ""')"
+          echo "fix_reviewer_logins=$(echo "$CONFIG" | jq -c '.fix_reviewer_logins // []')"
+        } >> "$GITHUB_OUTPUT"

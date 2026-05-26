@@ -63,29 +63,9 @@ jobs:
 
       - name: Fetch pipeline config
         id: cfg
-        run: |
-          set -euo pipefail
-          if [ -z "${CONFIG_URL:-}" ]; then
-            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
-            exit 1
-          fi
-          CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
-            echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
-            exit 1
-          }
-          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
-            echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
-            exit 1
-          fi
-          {
-            echo "plan_marker=$(echo "$CONFIG" | jq -r '.plan_marker')"
-            echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
-            echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
-            echo "in_progress_state=$(echo "$CONFIG" | jq -r '.in_progress_state')"
-            echo "in_review_state=$(echo "$CONFIG" | jq -r '.in_review_state')"
-            echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
-            echo "branch_prefix=$(echo "$CONFIG" | jq -r '.branch_prefix')"
-          } >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/fetch-pipeline-config
+        with:
+          config_url: ${{ env.CONFIG_URL }}
 
       - name: Flip to In Progress (visible feedback)
         env:
@@ -132,24 +112,11 @@ jobs:
           echo "trace=${TRACE} posted starting comment for $ISSUE"
 
       - name: Write MCP config
-        env:
-          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
-          MCP_URL: ${{ steps.cfg.outputs.mcp_url }}
-          MCP_TRANSPORT: ${{ steps.cfg.outputs.mcp_transport }}
-        run: |
-          cat > /tmp/mcp.json <<EOF
-          {
-            "mcpServers": {
-              "linear": {
-                "type": "${MCP_TRANSPORT}",
-                "url": "${MCP_URL}",
-                "headers": {
-                  "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
-                }
-              }
-            }
-          }
-          EOF
+        uses: ./.github/actions/write-mcp-config
+        with:
+          mcp_url: ${{ steps.cfg.outputs.mcp_url }}
+          mcp_transport: ${{ steps.cfg.outputs.mcp_transport }}
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
 
       - uses: anthropics/claude-code-action@v1
         env:
@@ -202,14 +169,15 @@ jobs:
             --disallowedTools "Bash(rm *)" "Bash(rm:*)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push --force*)" "Bash(git push -f*)" "Bash(git push --force-with-lease*)" "Bash(git push --mirror*)" "Bash(git push --delete*)" "Bash(git push *:*)" "Bash(git push * --delete*)" "Bash(git remote add *)" "Bash(git remote set-url *)" "Bash(git reset --hard origin/main*)" "Bash(git update-ref -d *)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh repo transfer*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh api -X DELETE*)" "Bash(gh api --method DELETE*)" "Bash(gh auth*)" "Bash(gh ssh-key*)" "Bash(gh gpg-key*)" "WebFetch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
 
       - name: Verify outcome
+        id: verify
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
           EXPECT_STATE: ${{ steps.cfg.outputs.in_review_state }}
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
           BRANCH_PREFIX: ${{ steps.cfg.outputs.branch_prefix }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
           # Auto-replan cap: max total automated retries we'll dispatch for one
           # issue across runs. Counted by scanning prior Stuck-context comments
           # on the issue (magic prefix `## 🚨 Stuck context — trace`). If a
@@ -221,6 +189,7 @@ jobs:
           set -euo pipefail
           if [ -z "${EXPECT_STATE:-}" ]; then
             echo "::warning::No config available, skipping verification"
+            echo "outcome=skipped" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -310,6 +279,7 @@ jobs:
 
           if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PR_COUNT" -gt 0 ] && [ "$HEAD_OK" = "1" ] && [ "$CLOSES_OK" = "1" ]; then
             echo "✓ verification passed (matched PR: $MATCHED_PR)"
+            echo "outcome=passed" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -330,8 +300,6 @@ jobs:
           # Trim leading space from FAIL_SHAPES for display.
           FAIL_SHAPES_TRIM=$(echo "$FAIL_SHAPES" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+/, /g')
 
-          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
           # Decide between auto-replan and Stuck:
           #   - need at least one ablatable failure shape
           #   - need a dispatch token to actually fire linear-replan
@@ -351,27 +319,63 @@ jobs:
             REPLAN_SKIP_REASON="failure shape not recognized (one of: ${FAIL_SHAPES_TRIM:-<none>})"
           fi
 
-          # Structured Stuck-context comment. Magic prefix is grep-able by
-          # future readers (linear-pickup, humans, this same step on retry).
-          # Body intentionally redundant with what a human would write so the
-          # next pickup has everything it needs in one comment.
-          BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `linear-implement` ([run](%s))\n**Failure shapes:** `%s`\n**Prior auto-retries:** %d / %d\n**Next action:** %s\n\n### What failed\n%b\n\n_Next pickup (human moves back to Todo (AI), or auto-replan succeeds): this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
-            "$TRACE" \
-            "$RUN_URL" \
-            "${FAIL_SHAPES_TRIM:-unknown}" \
-            "$PRIOR_STUCK_COUNT" \
-            "$AUTO_REPLAN_MAX" \
-            "$( [ "$DO_REPLAN" = "1" ] && echo "dispatching linear-replan (auto-retry $NEXT_ATTEMPT / $AUTO_REPLAN_MAX)" || echo "flipping to Stuck — $REPLAN_SKIP_REASON" )" \
-            "$FAIL_REASONS")
+          NEXT_ACTION_LINE="$( [ "$DO_REPLAN" = "1" ] && echo "dispatching linear-replan (auto-retry $NEXT_ATTEMPT / $AUTO_REPLAN_MAX)" || echo "flipping to Stuck — $REPLAN_SKIP_REASON" )"
+          EXTRA_HEADER=$(printf '**Prior auto-retries:** %d / %d' "$PRIOR_STUCK_COUNT" "$AUTO_REPLAN_MAX")
 
-          # Post the Stuck-context comment and capture its ID — we need the ID
-          # for the linear-replan dispatch (replan reads `client_payload.comment_id`
-          # as the "user's replan instruction").
-          POST_RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success comment{id}}}",variables:{id:$id,body:$body}}')")
-          STUCK_COMMENT_ID=$(echo "$POST_RESP" | jq -r '.data.commentCreate.comment.id // empty')
-          echo "trace=${TRACE} posted Stuck-context comment id=${STUCK_COMMENT_ID:-<none>}"
+          # Hand off to the next step. Stuck-context comment is posted by the
+          # linear-stuck-flip composite (flip_state=false — orchestration below
+          # decides whether to flip or dispatch replan).
+          {
+            echo "outcome=failed"
+            echo "issue_uuid=${ISSUE_UUID}"
+            echo "stuck_uuid=${STUCK_UUID}"
+            echo "fail_shapes=${FAIL_SHAPES_TRIM:-unknown}"
+            echo "extra_header=${EXTRA_HEADER}"
+            echo "next_action=${NEXT_ACTION_LINE}"
+            echo "do_replan=${DO_REPLAN}"
+            echo "next_attempt=${NEXT_ATTEMPT}"
+            echo "fail_reasons<<EOF"
+            printf '%b' "$FAIL_REASONS"
+            echo
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
+      - name: Post Stuck-context comment on failure
+        id: stuck_comment
+        if: always() && steps.verify.outputs.outcome == 'failed'
+        uses: ./.github/actions/linear-stuck-flip
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          issue: ${{ env.ISSUE }}
+          issue_uuid: ${{ steps.verify.outputs.issue_uuid }}
+          stuck_state: ${{ steps.cfg.outputs.stuck_state }}
+          stuck_uuid: ${{ steps.verify.outputs.stuck_uuid }}
+          trace: ${{ env.TRACE }}
+          workflow: linear-implement
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          failure_shapes: ${{ steps.verify.outputs.fail_shapes }}
+          extra_header_md: ${{ steps.verify.outputs.extra_header }}
+          next_action_md: ${{ steps.verify.outputs.next_action }}
+          what_failed_md: ${{ steps.verify.outputs.fail_reasons }}
+          # Defer the state flip — the next step decides between auto-replan
+          # (no Stuck flip) and Stuck (flip happens via the fallback step).
+          flip_state: 'false'
+
+      - name: Dispatch linear-replan or flip to Stuck
+        if: always() && steps.verify.outputs.outcome == 'failed'
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
+          DO_REPLAN: ${{ steps.verify.outputs.do_replan }}
+          NEXT_ATTEMPT: ${{ steps.verify.outputs.next_attempt }}
+          AUTO_REPLAN_MAX: 2
+          FAIL_SHAPES_TRIM: ${{ steps.verify.outputs.fail_shapes }}
+          STUCK_COMMENT_ID: ${{ steps.stuck_comment.outputs.comment_id }}
+          ISSUE_UUID: ${{ steps.verify.outputs.issue_uuid }}
+          STUCK_UUID: ${{ steps.verify.outputs.stuck_uuid }}
+        run: |
+          set -euo pipefail
           if [ "$DO_REPLAN" = "1" ] && [ -n "$STUCK_COMMENT_ID" ]; then
             # Fire linear-replan via repository_dispatch. We point comment_id at
             # the Stuck-context comment we just posted; the replan workflow
@@ -406,7 +410,11 @@ jobs:
           fi
 
           # Stuck path: either non-ablatable, cap reached, no dispatch token,
-          # or dispatch failed. Flip state and bail.
+          # or dispatch failed. Flip state and bail. (The Stuck-context comment
+          # is already posted by the prior step.)
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
           if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
             curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
               -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null

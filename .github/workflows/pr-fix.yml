@@ -48,37 +48,18 @@ jobs:
 
       - name: Fetch pipeline config
         id: cfg
+        uses: ./.github/actions/fetch-pipeline-config
+        with:
+          config_url: ${{ env.CONFIG_URL }}
+
+      - name: Validate review_bot_login present
+        env:
+          REVIEW_BOT_LOGIN: ${{ steps.cfg.outputs.review_bot_login }}
         run: |
-          set -euo pipefail
-          if [ -z "${CONFIG_URL:-}" ]; then
-            echo "::error::CONFIG_URL is empty. Set SSOT_WORKER_URL as a GitHub Actions variable on this repo (gh variable set SSOT_WORKER_URL --repo <owner>/<repo>)."
-            exit 1
-          fi
-          CONFIG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
-            echo "::error::Failed to fetch pipeline config from $CONFIG_URL"
-            exit 1
-          }
-          if ! echo "$CONFIG" | jq -e . >/dev/null 2>&1; then
-            echo "::error::Pipeline config from $CONFIG_URL is not valid JSON"
-            exit 1
-          fi
-          REVIEW_BOT_LOGIN=$(echo "$CONFIG" | jq -r '.review_bot_login // ""')
-          if [ -z "$REVIEW_BOT_LOGIN" ] || [ "$REVIEW_BOT_LOGIN" = "null" ]; then
+          if [ -z "${REVIEW_BOT_LOGIN:-}" ] || [ "$REVIEW_BOT_LOGIN" = "null" ]; then
             echo "::error::review_bot_login is missing or null in pipeline config — aborting (would otherwise cause unbounded auto-fix loop)"
             exit 1
           fi
-          {
-            echo "mcp_url=$(echo "$CONFIG" | jq -r '.linear_mcp_url')"
-            echo "mcp_transport=$(echo "$CONFIG" | jq -r '.linear_mcp_transport')"
-            echo "in_progress_state=$(echo "$CONFIG" | jq -r '.in_progress_state')"
-            echo "in_review_state=$(echo "$CONFIG" | jq -r '.in_review_state')"
-            echo "stuck_state=$(echo "$CONFIG" | jq -r '.stuck_state')"
-            echo "max_attempts=$(echo "$CONFIG" | jq -r '.pr_fix_max_attempts')"
-            echo "branch_prefix=$(echo "$CONFIG" | jq -r '.branch_prefix')"
-            echo "review_bot_login=$REVIEW_BOT_LOGIN"
-          } >> "$GITHUB_OUTPUT"
-          # Allowed reviewers as a JSON array string — checked in the gate step.
-          echo "fix_reviewer_logins=$(echo "$CONFIG" | jq -c '.fix_reviewer_logins')" >> "$GITHUB_OUTPUT"
 
       - name: Gate on reviewer
         id: gate
@@ -157,12 +138,11 @@ jobs:
           echo "BEFORE_SHA=${BEFORE_SHA}" >> "$GITHUB_ENV"
           echo "Starting at $BEFORE_SHA"
 
-      - name: Bail if cap exceeded
+      - name: Post cap-exceeded PR comment
+        id: bail
         if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
-          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
           COUNT: ${{ steps.cap.outputs.count }}
           MAX: ${{ steps.cfg.outputs.max_attempts }}
           REVIEW_BOT_LOGIN: ${{ steps.cfg.outputs.review_bot_login }}
@@ -173,31 +153,33 @@ jobs:
 
           if [ -z "${ISSUE:-}" ]; then
             echo "::notice::No Linear issue resolved — skipping Stuck flip"
+            echo "do_stuck=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Build the what-failed payload here so the composite step below has
+          # access to the COUNT/MAX/REVIEW_BOT_LOGIN values via outputs.
+          WHAT_FAILED=$(printf -- '- `%s` has requested changes %s times (max %s). Not dispatching another fix; the reviewer keeps finding blocking issues we can'"'"'t self-resolve.' \
+            "$REVIEW_BOT_LOGIN" "$COUNT" "$MAX")
+          {
+            echo "do_stuck=true"
+            echo "what_failed<<EOF"
+            echo "$WHAT_FAILED"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-          GQL_URL=https://api.linear.app/graphql
-          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
-          CT="Content-Type: application/json"
-
-          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
-          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
-          STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
-
-          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          # Structured Stuck-context comment (matches the format from
-          # linear-implement so future readers can grep one prefix).
-          LINEAR_BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `pr-fix` ([run](%s))\n**Failure shapes:** `auto_fix_cap_reached`\n**PR:** #%s\n**Next action:** flipping to Stuck — human needs to look\n\n### What failed\n- `%s` has requested changes %s times (max %s). Not dispatching another fix; the reviewer keeps finding blocking issues we can'"'"'t self-resolve.\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
-            "$TRACE" "$RUN_URL" "$PR" "$REVIEW_BOT_LOGIN" "$COUNT" "$MAX")
-          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
-
-          if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
-            curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
-            echo "trace=${TRACE} flipped $ISSUE to Stuck"
-          fi
+      - name: Stuck-flip on cap exceeded
+        if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded == 'true' && steps.bail.outputs.do_stuck == 'true'
+        uses: ./.github/actions/linear-stuck-flip
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          issue: ${{ env.ISSUE }}
+          stuck_state: ${{ steps.cfg.outputs.stuck_state }}
+          trace: ${{ env.TRACE }}
+          workflow: pr-fix
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          failure_shapes: auto_fix_cap_reached
+          extra_header_md: '**PR:** #${{ env.PR }}'
+          what_failed_md: ${{ steps.bail.outputs.what_failed }}
 
       - name: Configure git
         if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
@@ -248,24 +230,11 @@ jobs:
 
       - name: Write MCP config
         if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
-        env:
-          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
-          MCP_URL: ${{ steps.cfg.outputs.mcp_url }}
-          MCP_TRANSPORT: ${{ steps.cfg.outputs.mcp_transport }}
-        run: |
-          cat > /tmp/mcp.json <<EOF
-          {
-            "mcpServers": {
-              "linear": {
-                "type": "${MCP_TRANSPORT}",
-                "url": "${MCP_URL}",
-                "headers": {
-                  "Authorization": "Bearer ${LINEAR_APP_TOKEN}"
-                }
-              }
-            }
-          }
-          EOF
+        uses: ./.github/actions/write-mcp-config
+        with:
+          mcp_url: ${{ steps.cfg.outputs.mcp_url }}
+          mcp_transport: ${{ steps.cfg.outputs.mcp_transport }}
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
 
       - uses: anthropics/claude-code-action@v1
         if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
@@ -340,6 +309,7 @@ jobs:
             --disallowedTools "Bash(rm *)" "Bash(rm:*)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push --force*)" "Bash(git push -f*)" "Bash(git push --force-with-lease*)" "Bash(git push --mirror*)" "Bash(git push --delete*)" "Bash(git push *:*)" "Bash(git push * --delete*)" "Bash(git remote add *)" "Bash(git remote set-url *)" "Bash(git reset --hard origin/main*)" "Bash(git update-ref -d *)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh repo transfer*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh api -X DELETE*)" "Bash(gh api --method DELETE*)" "Bash(gh auth*)" "Bash(gh ssh-key*)" "Bash(gh gpg-key*)" "WebFetch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
 
       - name: Verify outcome
+        id: verify
         # Only run when gate explicitly succeeded (== 'false', not just != 'true'),
         # so a cfg-step failure earlier doesn't lead the verify into git ops on
         # an unset BEFORE_SHA.
@@ -347,8 +317,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
-          STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
           STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          IN_REVIEW_STATE: ${{ steps.cfg.outputs.in_review_state }}
         run: |
           set -euo pipefail
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -379,6 +349,7 @@ jobs:
 
           if [ "$NEW_COMMITS" -gt 0 ] && [ -z "$NON_BOT_AUTHORS" ]; then
             echo "✓ verification passed (claude[bot] pushed $NEW_COMMITS commit(s))"
+            echo "outcome=passed" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -414,7 +385,6 @@ jobs:
               # Flip Linear back to In Review since no fix was actually applied —
               # the PR is still in whatever state it was before the review.
               if [ -n "${ISSUE_UUID:-}" ]; then
-                IN_REVIEW_STATE='${{ steps.cfg.outputs.in_review_state }}'
                 GQL_URL=https://api.linear.app/graphql
                 AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
                 CT="Content-Type: application/json"
@@ -429,6 +399,7 @@ jobs:
                     -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LB" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
                 fi
               fi
+              echo "outcome=no_fix_needed" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "::error::Verification failed — no new commits, structured_output.action_taken='$SO_ACTION' (expected 'no_fix_needed' or 'fixed'), and no no-fix-needed marker on PR #$PR"
@@ -438,30 +409,31 @@ jobs:
 
           if [ -z "${ISSUE:-}" ] || [ -z "${ISSUE_UUID:-}" ]; then
             echo "::warning::No Linear issue resolved — skipping Stuck flip"
+            echo "outcome=failed_no_issue" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
-          GQL_URL=https://api.linear.app/graphql
-          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
-          CT="Content-Type: application/json"
+          # Hand off to the linear-stuck-flip composite below.
+          echo "outcome=failed_with_issue" >> "$GITHUB_OUTPUT"
 
-          STUCK_UUID=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$id}}')" \
-            | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+      - name: Stuck-flip on verify failure
+        if: always() && steps.gate.outputs.skip == 'false' && steps.cap.outputs.exceeded == 'false' && steps.verify.outputs.outcome == 'failed_with_issue'
+        uses: ./.github/actions/linear-stuck-flip
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          issue: ${{ env.ISSUE }}
+          issue_uuid: ${{ env.ISSUE_UUID }}
+          stuck_state: ${{ steps.cfg.outputs.stuck_state }}
+          trace: ${{ env.TRACE }}
+          workflow: pr-fix
+          run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          failure_shapes: no_new_commits
+          extra_header_md: '**PR:** #${{ env.PR }}'
+          what_failed_md: |
+            - Claude finished without pushing any new commits.
+            - structured_output.action_taken was not `no_fix_needed` and no `<!-- pr-fix-no-fix-needed -->` marker was posted on the PR.
+            - This usually means the model got stuck mid-task, the review comments were ambiguous, or the fix attempt hit a tool/turn limit.
 
-          # Structured Stuck-context comment (matches linear-implement format).
-          # Failure shape: claude finished without pushing any new commits AND
-          # didn't explicitly mark this as a no-fix-needed run — could be a
-          # confused model, ambiguous review, or a tool-call hang.
-          LINEAR_BODY=$(printf '## 🚨 Stuck context — trace %s\n\n**Workflow:** `pr-fix` ([run](%s))\n**Failure shapes:** `no_new_commits`\n**PR:** #%s\n**Next action:** flipping to Stuck — human needs to look\n\n### What failed\n- Claude finished without pushing any new commits.\n- structured_output.action_taken was not `no_fix_needed` and no `<!-- pr-fix-no-fix-needed -->` marker was posted on the PR.\n- This usually means the model got stuck mid-task, the review comments were ambiguous, or the fix attempt hit a tool/turn limit.\n\n_Next pickup: this comment is the breadcrumb. Reference the trace ID above to correlate logs._' \
-            "$TRACE" "$RUN_URL" "$PR")
-          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-            -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LINEAR_BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
-
-          if [ -n "$STUCK_UUID" ] && [ "$STUCK_UUID" != "null" ]; then
-            curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$STUCK_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
-            echo "trace=${TRACE} flipped $ISSUE to Stuck"
-          fi
-
-          exit 1
+      - name: Exit non-zero if verify failed
+        if: always() && steps.gate.outputs.skip == 'false' && steps.cap.outputs.exceeded == 'false' && (steps.verify.outputs.outcome == 'failed_with_issue' || steps.verify.outputs.outcome == 'failed_no_issue')
+        run: exit 1
