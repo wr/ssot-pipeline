@@ -120,7 +120,7 @@ async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): P
     // Dedupe: only fire on the *transition into* Todo (AI), not on every update
     // while the issue sits there. Linear sends multiple events for a new issue
     // (create + updates as project/priority/etc. settle) — without this, each
-    // one re-fires pickup and we get duplicate Plan comments. See W-88.
+    // one re-fires pickup and we get duplicate Plan comments.
     if (event.action === "update") {
       const uf = event.updatedFrom;
       if (uf === undefined || uf === null) {
