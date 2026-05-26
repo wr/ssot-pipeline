@@ -41,7 +41,7 @@ jobs:
 
       - name: Fetch pipeline config
         id: cfg
-        uses: ./.github/actions/fetch-pipeline-config
+        uses: wr/ssot-pipeline/.github/actions/fetch-pipeline-config@main
         with:
           config_url: ${{ env.CONFIG_URL }}
 
@@ -101,7 +101,7 @@ jobs:
 
       - name: Write MCP config
         if: env.ALREADY_PLANNED != '1'
-        uses: ./.github/actions/write-mcp-config
+        uses: wr/ssot-pipeline/.github/actions/write-mcp-config@main
         with:
           mcp_url: ${{ steps.cfg.outputs.mcp_url }}
           mcp_transport: ${{ steps.cfg.outputs.mcp_transport }}
@@ -251,7 +251,7 @@ jobs:
 
       - name: Stuck-flip on verify failure
         if: always() && steps.verify.outputs.needs_stuck == 'true'
-        uses: ./.github/actions/linear-stuck-flip
+        uses: wr/ssot-pipeline/.github/actions/linear-stuck-flip@main
         with:
           linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
           issue: ${{ env.ISSUE }}

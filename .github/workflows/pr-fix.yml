@@ -87,7 +87,7 @@ jobs:
 
       - name: Fetch pipeline config
         id: cfg
-        uses: ./.github/actions/fetch-pipeline-config
+        uses: wr/ssot-pipeline/.github/actions/fetch-pipeline-config@main
         with:
           config_url: ${{ env.CONFIG_URL }}
 
@@ -208,7 +208,7 @@ jobs:
 
       - name: Stuck-flip on cap exceeded
         if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded == 'true' && steps.bail.outputs.do_stuck == 'true'
-        uses: ./.github/actions/linear-stuck-flip
+        uses: wr/ssot-pipeline/.github/actions/linear-stuck-flip@main
         with:
           linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
           issue: ${{ env.ISSUE }}
@@ -269,7 +269,7 @@ jobs:
 
       - name: Write MCP config
         if: steps.gate.outputs.skip != 'true' && steps.cap.outputs.exceeded != 'true'
-        uses: ./.github/actions/write-mcp-config
+        uses: wr/ssot-pipeline/.github/actions/write-mcp-config@main
         with:
           mcp_url: ${{ steps.cfg.outputs.mcp_url }}
           mcp_transport: ${{ steps.cfg.outputs.mcp_transport }}
@@ -457,7 +457,7 @@ jobs:
 
       - name: Stuck-flip on verify failure
         if: always() && steps.gate.outputs.skip == 'false' && steps.cap.outputs.exceeded == 'false' && steps.verify.outputs.outcome == 'failed_with_issue'
-        uses: ./.github/actions/linear-stuck-flip
+        uses: wr/ssot-pipeline/.github/actions/linear-stuck-flip@main
         with:
           linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
           issue: ${{ env.ISSUE }}

@@ -151,7 +151,7 @@ jobs:
       - name: Fetch pipeline config
         if: steps.skip_check.outputs.skip != 'true'
         id: cfg
-        uses: ./.github/actions/fetch-pipeline-config
+        uses: wr/ssot-pipeline/.github/actions/fetch-pipeline-config@main
         with:
           config_url: ${{ env.CONFIG_URL }}
 
