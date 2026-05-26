@@ -19,6 +19,10 @@ on:
 
 jobs:
   fix:
+    # cancel-in-progress=false: an in-flight fix may have already pushed
+    # commits and flipped Linear state — cancelling mid-run loses that work.
+    # Duplicate REQUEST_CHANGES events serialize behind; the fix-attempt cap
+    # in the cfg step keeps the queue bounded.
     concurrency:
       group: pr-fix-${{ github.event.pull_request.number }}
       cancel-in-progress: false
