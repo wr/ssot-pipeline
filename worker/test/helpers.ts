@@ -16,36 +16,50 @@ export async function signWebhookBody(body: string, secret: string): Promise<str
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Build a Linear-style webhook POST request with valid signature, fresh
-// timestamp, and a delivery ID. Callers may override any of those via `opts`
-// to exercise edge cases (bad signature, stale timestamp, missing delivery
-// ID, etc.). The default secret matches what's wired into vitest.config.ts.
+// Build a Linear-style webhook POST request with valid signature and a delivery
+// ID header. Linear sends the freshness timestamp as `webhookTimestamp` in the
+// request *body* (not a header) — this helper injects a fresh one by default
+// so callers don't have to bake it into every fixture. The body is re-signed
+// after any injection so verification still passes.
+//
+// `opts.timestamp`:
+//   - omitted   → fresh Date.now() injected
+//   - number    → that value injected (used for stale/future-timestamp tests)
+//   - null      → no injection at all (used for missing-timestamp test)
+// `opts.deliveryId`:
+//   - omitted   → random delivery ID
+//   - string    → that exact ID (used for dedup tests)
+//   - null      → header omitted entirely (used for missing-delivery test)
 export interface WebhookRequestOpts {
   body: string;
   secret?: string;
   signature?: string;
-  timestamp?: number | string | null;
+  timestamp?: number | null;
   deliveryId?: string | null;
 }
 
 export async function buildWebhookRequest(opts: WebhookRequestOpts): Promise<Request> {
   const secret = opts.secret ?? "test-secret";
-  const signature = opts.signature ?? (await signWebhookBody(opts.body, secret));
+
+  let body = opts.body;
+  if (opts.timestamp !== null) {
+    const parsed = JSON.parse(body);
+    parsed.webhookTimestamp = opts.timestamp ?? Date.now();
+    body = JSON.stringify(parsed);
+  }
+
+  const signature = opts.signature ?? (await signWebhookBody(body, secret));
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Linear-Signature": signature,
   };
-  if (opts.timestamp !== null) {
-    const ts = opts.timestamp ?? Date.now();
-    headers["Linear-Delivery-Timestamp"] = String(ts);
-  }
   if (opts.deliveryId !== null) {
-    headers["Linear-Delivery-Id"] = opts.deliveryId ?? `delivery-${crypto.randomUUID()}`;
+    headers["Linear-Delivery"] = opts.deliveryId ?? `delivery-${crypto.randomUUID()}`;
   }
   return new Request("https://worker.test/linear", {
     method: "POST",
     headers,
-    body: opts.body,
+    body,
   });
 }
 
