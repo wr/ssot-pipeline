@@ -10,7 +10,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  test:
+    # Gate the deploy on the vitest harness (W-146). Worker code paths that
+    # previously only got covered by live Linear issues — HMAC, freshness,
+    # approval-phrase regex, isStateTransition, resolveRepo, DO dedup — now
+    # fail this job loudly before any prod deploy.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker deps
+        working-directory: worker
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: worker
+        run: npm run typecheck
+
+      - name: Vitest
+        working-directory: worker
+        run: npm test
+
   deploy:
+    needs: test
     concurrency:
       group: deploy-worker
       cancel-in-progress: false
