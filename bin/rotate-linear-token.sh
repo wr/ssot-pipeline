@@ -34,7 +34,7 @@ NEW_TOKEN="${1:-${LINEAR_APP_TOKEN:-}}"
 if [ "${NEW_TOKEN:-}" = "-" ]; then
   NEW_TOKEN="$(cat)"
 fi
-NEW_TOKEN="${NEW_TOKEN%%$'\n'}"   # strip trailing newline if pasted via heredoc
+NEW_TOKEN="${NEW_TOKEN%$'\n'}"   # strip trailing newline if pasted via heredoc
 
 if [ -z "$NEW_TOKEN" ]; then
   cat >&2 <<EOF
@@ -113,14 +113,17 @@ fi
 # --- 2. GitHub Actions secrets --------------------------------------------
 
 echo "→ Setting GitHub Actions secret LINEAR_APP_TOKEN…"
-for REPO in $REPOS; do
-  if gh secret set LINEAR_APP_TOKEN --repo "$REPO" --body "$NEW_TOKEN" >/dev/null 2>&1; then
+# Pipe via stdin (not --body) so the token never appears in `ps aux`.
+# `gh secret set` reads the secret value from stdin when --body is omitted.
+while IFS= read -r REPO; do
+  [ -z "$REPO" ] && continue
+  if printf '%s' "$NEW_TOKEN" | gh secret set LINEAR_APP_TOKEN --repo "$REPO" >/dev/null 2>&1; then
     echo "  ✓ $REPO"
   else
     echo "  ✗ $REPO — gh secret set failed (do you have admin access?)" >&2
     exit 1
   fi
-done
+done <<< "$REPOS"
 
 # --- 3. Cloudflare Worker --------------------------------------------------
 
