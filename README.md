@@ -13,10 +13,27 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 - **`bin/init-target-repo.sh`** — one-command setup for a new target repo.
 - **`docs/`** — identity setup walkthroughs (Linear OAuth app, GitHub Apps) and architecture notes.
 
+## Forking this repo
+
+Before deploying a fork, update `config/pipeline.json` with your own values — the Worker and workflows read config from there at runtime:
+
+| Field | What to set |
+|---|---|
+| `approved_user_ids` | Your Linear user ID (find it via the Linear API or in your profile URL) |
+| `branch_prefix` | Your preferred branch prefix, e.g. `yourname/` |
+| `review_bot_login` | `<your-handle>-claude-reviewer[bot]` — the GitHub App you create for reviews |
+| `fix_reviewer_logins` | `["<your-handle>-claude-reviewer[bot]"]` — same App, plus your own GitHub login if you want human reviews to trigger auto-fix too |
+| `approval_emojis` | Linear emoji names that count as plan approval via reaction (default `["+1", "white_check_mark"]`) |
+| `approval_phrases` | Comment phrases/emoji that count as approval when replied to a plan (default `["ship it", "lgtm", "looks good", "approved", "go for it", "👍", "✅"]`) |
+| `approval_ack_emoji` | Linear emoji name the Worker uses as 🤖 read-receipt (default `"robot_face"`) |
+| `project_to_repo` | Clear this — `init-target-repo.sh` populates it per project |
+
+Then: deploy the Worker, set secrets, and run `init-target-repo.sh` for each target repo. Full walkthrough: [`docs/fork-setup.md`](./docs/fork-setup.md).
+
 ## Quick setup (first-time, for the maintainer)
 
 1. Create the `claude` Linear OAuth app — see [`docs/linear-app-setup.md`](./docs/linear-app-setup.md)
-2. Install the `claude[bot]` GitHub App + create the `wr-claude-reviewer` GitHub App — see [`docs/github-app-setup.md`](./docs/github-app-setup.md). The reviewer App is a separate identity so it can APPROVE / REQUEST_CHANGES on PRs authored by `claude[bot]` (GitHub blocks PR authors from reviewing their own PR).
+2. Install the `claude[bot]` GitHub App + create the `<your-handle>-claude-reviewer` GitHub App — see [`docs/github-app-setup.md`](./docs/github-app-setup.md). The reviewer App is a separate identity so it can APPROVE / REQUEST_CHANGES on PRs authored by `claude[bot]` (GitHub blocks PR authors from reviewing their own PR).
 3. First-time Worker deploy — `cd worker && npx wrangler deploy`. After that, the `deploy-worker` GitHub Action redeploys automatically on every merge that touches `config/pipeline.json` or `worker/**` (needs repo secret `CLOUDFLARE_API_TOKEN`).
 4. Register the Linear webhook → your Worker URL
 5. Run `./bin/init-target-repo.sh <repo-path> <linear-project-url-or-id>` for each project you want to wire up
@@ -31,14 +48,14 @@ Per-repo, setup is one command:
 
 The Linear arg accepts a full project URL (`https://linear.app/<ws>/project/<slug>`), a bare URL slug (`<slug>`), or the UUID — copy whichever is easiest from the Linear UI.
 
-Prereqs: `gh` CLI authenticated, `jq` installed, the `wr-claude-reviewer` GitHub App installed on the target repo, and four secrets resolvable via env var, macOS Keychain, or interactive prompt: `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`. To skip prompts every run, seed Keychain once:
+Prereqs: `gh` CLI authenticated, `jq` installed, the `<your-handle>-claude-reviewer` GitHub App installed on the target repo, and four secrets resolvable via env var, macOS Keychain, or interactive prompt: `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`. To skip prompts every run, seed Keychain once:
 
 ```
 security add-generic-password -s ssot-pipeline -a LINEAR_APP_TOKEN -w '<token>'
 security add-generic-password -s ssot-pipeline -a CLAUDE_CODE_OAUTH_TOKEN -w '<token>'
 security add-generic-password -s ssot-pipeline -a CLAUDE_REVIEWER_APP_ID -w '<app-id>'
 security add-generic-password -s ssot-pipeline -a CLAUDE_REVIEWER_APP_KEY \
-  -w "$(cat /path/to/wr-claude-reviewer.private-key.pem)"
+  -w "$(cat /path/to/<your-handle>-claude-reviewer.private-key.pem)"
 ```
 
 (Add `-U` to overwrite if an entry already exists. Multi-line values like the PEM are stored as binary — `load_secret` transparently hex-decodes on read.) The script reads in order: env → Keychain → prompt.
@@ -83,9 +100,9 @@ In Review ──REQUEST_CHANGES──▶ In Progress ──fix pushed──▶ I
 
 Capped at `pr_fix_max_attempts` (default 2) from `config/pipeline.json`. On the (N+1)th REQUEST_CHANGES, the workflow posts a stuck comment, flips Linear to `Stuck`, and exits — human intervention required.
 
-By default only reviews by `wr-claude-reviewer[bot]` or `wr` trigger the fix; edit `fix_reviewer_logins` in `config/pipeline.json` to widen.
+By default only reviews by `<your-handle>-claude-reviewer[bot]` or your own GitHub login trigger the fix; edit `fix_reviewer_logins` in `config/pipeline.json` to widen.
 
-Why a separate `wr-claude-reviewer[bot]` instead of having `claude[bot]` review its own PR? GitHub hardcodes "pull request authors can't approve their own pull request" — so the `claude[bot]` App that opened the PR can only file `COMMENTED` reviews, never `APPROVE` or `REQUEST_CHANGES`. The reviewer App is a distinct identity that GitHub allows to approve/reject those PRs. See [`docs/github-app-setup.md`](./docs/github-app-setup.md) for setup.
+Why a separate `<your-handle>-claude-reviewer[bot]` instead of having `claude[bot]` review its own PR? GitHub hardcodes "pull request authors can't approve their own pull request" — so the `claude[bot]` App that opened the PR can only file `COMMENTED` reviews, never `APPROVE` or `REQUEST_CHANGES`. The reviewer App is a distinct identity that GitHub allows to approve/reject those PRs. See [`docs/github-app-setup.md`](./docs/github-app-setup.md) for setup.
 
 ## Trace IDs
 
