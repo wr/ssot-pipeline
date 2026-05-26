@@ -304,7 +304,8 @@ jobs:
           claude_args: |
             --permission-mode bypassPermissions
             --mcp-config /tmp/mcp.json
-            --allowedTools mcp__linear__* mcp__github__* Bash Read Write Edit Grep Glob
+            --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "mcp__linear__create_attachment" "mcp__github__get_pull_request" "mcp__github__pull_request_read" "mcp__github__list_pull_requests" "mcp__github__add_comment_to_pending_review" "mcp__github__add_reply_to_pull_request_comment" "Bash" "Read" "Write" "Edit" "Grep" "Glob"
+            --disallowedTools "Bash(rm *)" "Bash(rm:*)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push --force*)" "Bash(git push -f*)" "Bash(git push --force-with-lease*)" "Bash(git push --mirror*)" "Bash(git push --delete*)" "Bash(git push *:*)" "Bash(git push * --delete*)" "Bash(git remote add *)" "Bash(git remote set-url *)" "Bash(git reset --hard origin/main*)" "Bash(git update-ref -d *)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh repo transfer*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh api -X DELETE*)" "Bash(gh api --method DELETE*)" "Bash(gh auth*)" "Bash(gh ssh-key*)" "Bash(gh gpg-key*)" "WebFetch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
 
       - name: Verify outcome
         # Only run when gate explicitly succeeded (== 'false', not just != 'true'),

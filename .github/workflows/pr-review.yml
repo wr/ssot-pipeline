@@ -187,8 +187,8 @@ jobs:
 
             Approve/reject rule: use REQUEST_CHANGES only if there is at least one `blocking` finding (new or still-unresolved). Otherwise APPROVE with a brief summary of what looks good and all nits grouped at the end.
           claude_args: |
-            --permission-mode bypassPermissions
-            --allowedTools mcp__github__* Read Grep Glob
+            --allowedTools "mcp__github__get_pull_request" "mcp__github__pull_request_read" "mcp__github__list_pull_requests" "mcp__github__pull_request_review_write" "mcp__github__add_comment_to_pending_review" "mcp__github__get_file_contents" "Bash(gh pr view*)" "Bash(gh pr diff*)" "Bash(gh pr list*)" "Bash(gh pr checks*)" "Bash(gh api repos/*/pulls/*)" "Bash(gh api repos/*/issues/*/comments*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git blame*)" "Bash(git rev-parse*)" "Bash(git status*)" "Bash(git branch*)" "Read" "Grep" "Glob"
+            --disallowedTools "Write" "Edit" "NotebookEdit" "WebFetch" "Bash(rm *)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push*)" "Bash(git commit*)" "Bash(git reset --hard*)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh auth*)" "Bash(gh api -X DELETE*)" "Bash(gh api -X POST*)" "Bash(gh api -X PUT*)" "Bash(gh api -X PATCH*)" "Bash(gh api --method DELETE*)" "Bash(gh api --method POST*)" "Bash(gh api --method PUT*)" "Bash(gh api --method PATCH*)" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
             --model ${{ steps.effort.outputs.model }}
             --max-turns ${{ steps.effort.outputs.max_turns }}
 
