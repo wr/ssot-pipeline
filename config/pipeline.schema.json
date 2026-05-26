@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/wr/ssot-pipeline/blob/main/config/pipeline.schema.json",
+  "title": "SSOT Pipeline Config",
+  "description": "Schema for config/pipeline.json. Every field listed here is consumed by either the Cloudflare Worker (worker/src/index.ts) or one of the reusable workflows in .github/workflows/. Bump `version` whenever the contract between Worker and workflows changes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "plan_marker",
+    "linear_mcp_url",
+    "linear_mcp_transport",
+    "todo_ai_state",
+    "planning_state",
+    "plan_review_state",
+    "in_progress_state",
+    "in_review_state",
+    "stuck_state",
+    "approval_emojis",
+    "approval_phrases",
+    "approval_ack_emoji",
+    "branch_prefix",
+    "pr_fix_max_attempts",
+    "review_bot_login",
+    "fix_reviewer_logins",
+    "approved_user_ids",
+    "project_to_repo"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Editor IntelliSense hint. Points at the sibling pipeline.schema.json file."
+    },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Config schema version. Bump (and update the const here) when the contract between Worker and workflows changes — see CLAUDE.md note about templates/ssot.yml."
+    },
+    "plan_marker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Prefix that identifies a plan comment in Linear. Worker checks `comment.body.startsWith(plan_marker)` to decide whether reactions/replies count as plan interactions."
+    },
+    "linear_mcp_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https?://",
+      "description": "URL of the Linear MCP server passed into Claude Code prompts in workflows."
+    },
+    "linear_mcp_transport": {
+      "type": "string",
+      "enum": ["http", "sse", "stdio"],
+      "description": "MCP transport mode for the Linear MCP server."
+    },
+    "todo_ai_state": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Linear state name that triggers linear-pickup. Worker compares `issue.state.name === todo_ai_state`."
+    },
+    "planning_state": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Linear state name used during plan generation (linear-pickup, linear-replan)."
+    },
+    "plan_review_state": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Linear state name after a plan has been posted and is awaiting approval."
+    },
+    "in_progress_state": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Linear state name when implementation is in flight. A human moving an issue here also triggers linear-implement (gated on approved_user_ids)."
+    },
+    "in_review_state": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Linear state name when a PR has been opened and is awaiting review."
+    },
+    "stuck_state": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Linear state name used by workflow verification steps when something goes wrong."
+    },
+    "approval_emojis": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Linear reaction emoji names that count as plan approval (Worker checks Reaction.create)."
+    },
+    "approval_phrases": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Substrings (case-insensitive) in a reply comment that count as plan approval. Worker uses `bodyLower.includes(phrase.toLowerCase())`."
+    },
+    "approval_ack_emoji": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Linear reaction emoji name the Worker posts back as an ack when a plan/approval/comment is processed."
+    },
+    "branch_prefix": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "/$",
+      "description": "Git branch prefix injected into prompts (e.g. `wells/`). Must end with `/`."
+    },
+    "pr_fix_max_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Max number of pr-fix retry attempts before giving up and flipping the issue to Stuck."
+    },
+    "review_bot_login": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GitHub login of the reviewer bot (e.g. `wr-claude-reviewer[bot]`). pr-review and pr-fix workflows compare against this."
+    },
+    "fix_reviewer_logins": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "GitHub logins whose PR review comments trigger pr-fix."
+    },
+    "approved_user_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "description": "Linear user IDs (UUIDs) whose reactions/comments/state-changes count as human approval. Worker gates on this in handleReactionCreate, handleCommentCreate, and handleIssueUpdate."
+    },
+    "project_to_repo": {
+      "type": "object",
+      "minProperties": 1,
+      "patternProperties": {
+        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$",
+          "description": "GitHub repo in `owner/name` form."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Map of Linear project UUID → GitHub `owner/name` repo. Worker's lookupRepo() routes repository_dispatch calls via this map."
+    }
+  }
+}

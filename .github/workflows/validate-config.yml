@@ -1,0 +1,37 @@
+name: validate-config
+
+# Fails the build when config/pipeline.json doesn't match config/pipeline.schema.json.
+# Catches typos like `approval_phrase` vs `approval_phrases` that would otherwise
+# silently break the loop because workflows and the Worker consume the config
+# independently with no shared validation. See W-154.
+
+on:
+  pull_request:
+    paths:
+      - config/**
+      - .github/workflows/validate-config.yml
+  push:
+    branches: [main]
+    paths:
+      - config/**
+      - .github/workflows/validate-config.yml
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install ajv toolchain
+        run: npm install --no-save --no-package-lock ajv-cli@5 ajv-formats@3
+
+      - name: Validate pipeline.json against schema
+        # -c ajv-formats so `format: uri`/`format: uuid` are actually checked instead of warned-then-ignored.
+        run: npx ajv validate -s config/pipeline.schema.json -d config/pipeline.json --spec=draft2020 --strict=false -c ajv-formats
