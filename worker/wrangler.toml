@@ -17,3 +17,6 @@ class_name = "DedupDO"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DedupDO"]
+
+[observability]
+enabled = true
