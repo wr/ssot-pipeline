@@ -36,7 +36,7 @@ jobs:
       - name: Trace
         run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE} comment=${COMMENT_ID}"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Fetch pipeline config
         id: cfg
