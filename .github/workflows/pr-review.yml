@@ -114,39 +114,66 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Skip if PR modifies workflow files
+      - name: Skip if PR modifies workflow files or is from Dependabot
         id: skip_check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          # claude-code-action's OIDC token exchange rejects PRs whose workflow
-          # files differ from main (security: stops a PR from editing the review
-          # workflow to leak the app token). Detect that and exit cleanly with a
-          # one-time explanatory comment, so workflow-editing PRs get a green
-          # check instead of a confusing 401.
+          # Two early-skip paths, both exit before any secret-using step runs:
           #
-          # This runs BEFORE Fetch pipeline config so that a workflow-editing
-          # PR opened on a repo where SSOT_WORKER_URL isn't set yet still
-          # takes the clean skip path instead of hard-failing on the cfg guard.
-          COUNT=$(gh api "repos/${REPO}/pulls/${PR}/files" --paginate \
+          # 1. Workflow-file edits — claude-code-action's OIDC token exchange
+          #    rejects PRs whose workflow files differ from main (security:
+          #    stops a PR from editing the review workflow to leak the app
+          #    token). Exit cleanly with an explanatory comment so the check
+          #    is green instead of a confusing 401.
+          #
+          # 2. Dependabot PRs — GitHub deliberately runs Dependabot PR
+          #    workflows in a hardened context where repo secrets are NOT
+          #    exposed. The `Mint reviewer-bot installation token` step needs
+          #    CLAUDE_REVIEWER_APP_ID/KEY and hard-fails when they're empty.
+          #    Skip dep bumps; if you really want them reviewed, mirror the
+          #    secrets into the Dependabot secret store (gh secret set
+          #    --app dependabot ...) — out of scope for the default flow.
+          #
+          # Runs BEFORE Fetch pipeline config so that workflow-editing PRs
+          # on a repo where SSOT_WORKER_URL isn't set yet still take the
+          # clean skip path instead of hard-failing on the cfg guard.
+          WORKFLOW_COUNT=$(gh api "repos/${REPO}/pulls/${PR}/files" --paginate \
             --jq '[.[] | select(.filename | startswith(".github/workflows/"))] | length')
-          if [ "$COUNT" = "0" ]; then
+          IS_DEPENDABOT=false
+          if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+            IS_DEPENDABOT=true
+          fi
+
+          if [ "$WORKFLOW_COUNT" = "0" ] && [ "$IS_DEPENDABOT" = "false" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "skip=true" >> "$GITHUB_OUTPUT"
-          echo "::notice::PR modifies $COUNT workflow file(s) — skipping claude review (trace=${TRACE})"
-          MARKER="<!-- pr-review-skip:workflows -->"
+
+          if [ "$IS_DEPENDABOT" = "true" ]; then
+            REASON="dependabot"
+            MARKER="<!-- pr-review-skip:dependabot -->"
+            NOTICE_MSG="PR is from Dependabot — skipping claude review (secrets unavailable in Dependabot context)"
+            COMMENT_BODY=$(printf '%s\n🤖 **pr-review skipped** — Dependabot PR workflows run in a hardened context that does not expose repository secrets, so the reviewer App credentials are unavailable. Merge after manual inspection. _(trace: %s)_' "$MARKER" "$TRACE")
+          else
+            REASON="workflows"
+            MARKER="<!-- pr-review-skip:workflows -->"
+            NOTICE_MSG="PR modifies $WORKFLOW_COUNT workflow file(s) — skipping claude review"
+            COMMENT_BODY=$(printf '%s\n🤖 **pr-review skipped** — this PR modifies `.github/workflows/*`, and `claude-code-action`'"'"'s OIDC token exchange requires workflow files on the PR branch to be byte-identical to `main`. Merge once approved; PRs that do not touch workflows will be reviewed normally. _(trace: %s)_' "$MARKER" "$TRACE")
+          fi
+
+          echo "::notice::$NOTICE_MSG (trace=${TRACE})"
           EXISTING=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
             --jq "[.[] | select(.body | contains(\"$MARKER\"))] | length")
           if [ "$EXISTING" != "0" ]; then
-            echo "Skip notice already posted — not duplicating"
+            echo "Skip notice already posted ($REASON) — not duplicating"
             exit 0
           fi
-          BODY=$(printf '%s\n🤖 **pr-review skipped** — this PR modifies `.github/workflows/*`, and `claude-code-action`'"'"'s OIDC token exchange requires workflow files on the PR branch to be byte-identical to `main`. Merge once approved; PRs that do not touch workflows will be reviewed normally. _(trace: %s)_' "$MARKER" "$TRACE")
-          gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          gh pr comment "$PR" --repo "$REPO" --body "$COMMENT_BODY"
 
       - name: Fetch pipeline config
         if: steps.skip_check.outputs.skip != 'true'
@@ -282,7 +309,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${SKIP:-false}" = "true" ]; then
-            echo "✓ verification skipped — PR modifies workflows (claude-code-action OIDC limitation)"
+            echo "✓ verification skipped — review intentionally skipped (workflow edits or Dependabot PR)"
             exit 0
           fi
           if [ -z "${REVIEW_BOT_LOGIN:-}" ]; then
