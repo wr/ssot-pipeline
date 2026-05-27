@@ -207,8 +207,19 @@ jobs:
           QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} comments{nodes{body}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
 
+          # Defensive: surface the Linear response when .data.issue is null so we
+          # get an actionable error rather than an opaque jq null-iteration on
+          # the diagnostic path. Most common cause: revoked LINEAR_APP_TOKEN. If
+          # we can't reach Linear, we can't flip to Stuck anyway — the
+          # ::error:: annotation is the signal.
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id // ""')
+          if [ -z "$ISSUE_UUID" ] || [ "$ISSUE_UUID" = "null" ]; then
+            echo "::error::Linear GraphQL returned no issue for ${ISSUE} (trace=${TRACE}). Most likely cause: LINEAR_APP_TOKEN revoked or scope-limited. Raw response below."
+            echo "$RESP" | jq . || echo "$RESP"
+            exit 1
+          fi
+
           STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
-          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           MARKER_COUNT=$(echo "$RESP" | jq --arg m "$PLAN_MARKER" '.data.issue.comments.nodes | map(select(.body | startswith($m))) | length')
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 

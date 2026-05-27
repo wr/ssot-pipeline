@@ -239,7 +239,17 @@ jobs:
 
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
-          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+
+          # Defensive: bail fast if Linear returned no .data.issue (most often
+          # LINEAR_APP_TOKEN revoked). Exiting here before Claude runs keeps us
+          # from wasting API spend on a doomed run.
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id // ""')
+          if [ -z "$ISSUE_UUID" ] || [ "$ISSUE_UUID" = "null" ]; then
+            echo "::error::Linear GraphQL returned no issue for ${ISSUE} (trace=${TRACE}). Most likely cause: LINEAR_APP_TOKEN revoked or scope-limited. Raw response below."
+            echo "$RESP" | jq . || echo "$RESP"
+            exit 1
+          fi
+
           IN_PROGRESS_UUID=$(echo "$RESP" | jq -r --arg n "$IN_PROGRESS_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
           echo "ISSUE_UUID=${ISSUE_UUID}" >> "$GITHUB_ENV"
@@ -427,15 +437,25 @@ jobs:
                 GQL_URL=https://api.linear.app/graphql
                 AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
                 CT="Content-Type: application/json"
-                IR_UUID=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-                  -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$id}}')" \
-                  | jq -r --arg n "$IN_REVIEW_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
-                if [ -n "$IR_UUID" ] && [ "$IR_UUID" != "null" ]; then
-                  curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-                    -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$IR_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
-                  LB=$(printf '🟢 Auto-fix on PR #%s determined no fix was needed. Returned issue to %s. [Workflow run](%s) _(trace: %s)_' "$PR" "$IN_REVIEW_STATE" "$RUN_URL" "$TRACE")
-                  curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
-                    -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LB" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+                # Split the curl|jq pipe so we can null-guard the response
+                # before jq indexes into it. On null .data (typical of a
+                # revoked LINEAR_APP_TOKEN) downgrade to a warning and skip
+                # the state flip — this is the secondary no-fix-needed path,
+                # not load-bearing for the verification outcome itself.
+                IR_RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+                  -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){team{states{nodes{id name}}}}}",variables:{id:$id}}')")
+                if echo "$IR_RESP" | jq -e '.data.issue.team' >/dev/null 2>&1; then
+                  IR_UUID=$(echo "$IR_RESP" | jq -r --arg n "$IN_REVIEW_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
+                  if [ -n "$IR_UUID" ] && [ "$IR_UUID" != "null" ]; then
+                    curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+                      -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$IR_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
+                    LB=$(printf '🟢 Auto-fix on PR #%s determined no fix was needed. Returned issue to %s. [Workflow run](%s) _(trace: %s)_' "$PR" "$IN_REVIEW_STATE" "$RUN_URL" "$TRACE")
+                    curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+                      -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$LB" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
+                  fi
+                else
+                  echo "::warning::Linear GraphQL returned no .data.issue for ${ISSUE} (trace=${TRACE}) on the no-fix-needed state-flip path. Most likely cause: LINEAR_APP_TOKEN revoked or scope-limited. Skipping the In Review flip — verification still passes."
+                  echo "$IR_RESP" | jq . || echo "$IR_RESP"
                 fi
               fi
               echo "outcome=no_fix_needed" >> "$GITHUB_OUTPUT"
