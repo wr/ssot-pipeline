@@ -38,7 +38,17 @@ Steps:
 9. Set Linear issue state to the in-review state name from the session-start pipeline config (mcp__linear__save_issue).
 10. Post a Linear comment as a threaded reply under the starting comment: "Ready for review: <PR-url>  _(trace: <TRACE>)_". Use `parentId` as in step 3b. If the starting comment ID is empty, post as a top-level comment instead.
 
-If anything blocks you (plan unclear, tests fail, can't push): post a Linear comment describing the blocker (include the trace), set state back to "In Progress", and stop. Don't open a broken PR.
+11. As your FINAL output (after all tool calls), return a JSON object matching this schema:
+    {
+      "pr_opened": boolean,   // true if you opened the PR in step 7
+      "pr_url": string,       // the PR URL from step 7; "" if no PR was opened
+      "state_set": boolean,   // true if you set the in-review state in step 9
+      "summary": string,      // one-sentence summary of what you implemented (max ~200 chars)
+      "blockers": string[]    // anything that blocked you or forced an assumption; [] if clean
+    }
+    The action validates this against a JSON schema; the workflow's verify step consumes it via structured_output as an additive cross-check (the world-state assertions remain authoritative). Be honest — if you hit the blocker path below, return `pr_opened: false` with the reason(s) in `blockers` rather than reporting success.
+
+If anything blocks you (plan unclear, tests fail, can't push): post a Linear comment describing the blocker (include the trace), set state back to "In Progress", and stop. Don't open a broken PR. Still return the step 11 JSON with `pr_opened: false` and the blocker(s) listed.
 
 --- per-request context (variable; provided at invocation) ---
 $ARGUMENTS

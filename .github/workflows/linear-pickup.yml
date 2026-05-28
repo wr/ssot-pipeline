@@ -153,7 +153,7 @@ jobs:
             --mcp-config /tmp/mcp.json
             --max-turns 30
             --model claude-sonnet-4-6
-            --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "Read" "Grep" "Glob"
+            --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "mcp__linear__list_issues" "mcp__linear__get_project" "mcp__linear__list_projects" "mcp__linear__list_documents" "mcp__linear__get_document" "Read" "Grep" "Glob"
             --disallowedTools "Bash" "Write" "Edit" "WebFetch" "WebSearch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["plan_posted","state_set","plan_summary","ambiguities","complexity"],"properties":{"plan_posted":{"type":"boolean"},"state_set":{"type":"boolean"},"plan_summary":{"type":"string","maxLength":500},"ambiguities":{"type":"array","items":{"type":"string"},"maxItems":20},"complexity":{"type":"string","enum":["S","M","L"]}}}'
 

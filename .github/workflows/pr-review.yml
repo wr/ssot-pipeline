@@ -38,6 +38,11 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+      # Lets the bundled github_ci MCP server read CI status + job logs. Those
+      # tools use the workflow's auto-minted GITHUB_TOKEN (NOT the reviewer App
+      # token passed as github_token below), so the grant has to live here and be
+      # paired with `additional_permissions: actions: read` on the claude step.
+      actions: read
     env:
       PR: ${{ github.event.pull_request.number }}
       EFFORT: ${{ inputs.effort || 'medium' }}
@@ -249,6 +254,13 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.reviewer_token.outputs.token }}
           allowed_bots: "claude,github-actions"
+          # Unlocks the bundled github_ci MCP tools (get_ci_status,
+          # get_workflow_run_details, download_job_log) so the reviewer can read
+          # failing-check logs instead of guessing. Gated on `actions: read` in the
+          # job permissions block above; the tools read via the workflow
+          # GITHUB_TOKEN. Only effective in PR context (pr-review always is).
+          additional_permissions: |
+            actions: read
           # Stable instructions live in the ssot-agents plugin skill (loaded via
           # --plugin-dir below); this prompt invokes the skill and passes only
           # the per-request context. The skill body substitutes it for $ARGUMENTS.
@@ -264,7 +276,7 @@ jobs:
             </untrusted_data>
           claude_args: |
             --plugin-dir ${{ runner.temp }}/ssot-plugin/plugins/ssot-agents
-            --allowedTools "mcp__github__get_pull_request" "mcp__github__get_pull_request_diff" "mcp__github__get_pull_request_files" "mcp__github__get_pull_request_reviews" "mcp__github__get_pull_request_review_comments" "mcp__github__create_pending_pull_request_review" "mcp__github__add_pull_request_review_comment_to_pending_review" "mcp__github__submit_pending_pull_request_review" "mcp__github__create_and_submit_pull_request_review" "mcp__github__add_issue_comment" "mcp__github__get_file_contents" "Bash(gh pr view*)" "Bash(gh pr diff*)" "Bash(gh pr list*)" "Bash(gh pr checks*)" "Bash(gh pr comment*)" "Bash(gh api repos/*/pulls/*)" "Bash(gh api repos/*/issues/*/comments*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git blame*)" "Bash(git rev-parse*)" "Bash(git status*)" "Bash(git branch*)" "Read" "Grep" "Glob"
+            --allowedTools "mcp__github__get_pull_request" "mcp__github__get_pull_request_diff" "mcp__github__get_pull_request_files" "mcp__github__get_pull_request_reviews" "mcp__github__get_pull_request_review_comments" "mcp__github__create_pending_pull_request_review" "mcp__github__add_pull_request_review_comment_to_pending_review" "mcp__github__submit_pending_pull_request_review" "mcp__github__create_and_submit_pull_request_review" "mcp__github__add_issue_comment" "mcp__github__get_file_contents" "mcp__github_ci__get_ci_status" "mcp__github_ci__get_workflow_run_details" "mcp__github_ci__download_job_log" "Bash(gh pr view*)" "Bash(gh pr diff*)" "Bash(gh pr list*)" "Bash(gh pr checks*)" "Bash(gh pr comment*)" "Bash(gh api repos/*/pulls/*)" "Bash(gh api repos/*/issues/*/comments*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git blame*)" "Bash(git rev-parse*)" "Bash(git status*)" "Bash(git branch*)" "Read" "Grep" "Glob"
             --disallowedTools "Write" "Edit" "NotebookEdit" "WebFetch" "Bash(rm *)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push*)" "Bash(git commit*)" "Bash(git reset --hard*)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh auth*)" "Bash(gh api -X DELETE*)" "Bash(gh api -X POST*)" "Bash(gh api -X PUT*)" "Bash(gh api -X PATCH*)" "Bash(gh api --method DELETE*)" "Bash(gh api --method POST*)" "Bash(gh api --method PUT*)" "Bash(gh api --method PATCH*)" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
             --model ${{ steps.effort.outputs.model }}
             --max-turns ${{ steps.effort.outputs.max_turns }}
