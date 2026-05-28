@@ -142,7 +142,7 @@ jobs:
           fi
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         if: steps.gate.outputs.skip != 'true'
         with:
           fetch-depth: 0
