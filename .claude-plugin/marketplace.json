@@ -1,0 +1,17 @@
+{
+  "name": "ssot-pipeline",
+  "owner": {
+    "name": "Wells Riley",
+    "email": "hi@wells.ee"
+  },
+  "metadata": {
+    "description": "Agent skills that drive the SSOT Linear <-> Claude Code <-> GitHub loop. Proof-of-concept scope: pr-review. See docs/plugin-packaging.md (W-158)."
+  },
+  "plugins": [
+    {
+      "name": "ssot-agents",
+      "source": "./plugins/ssot-agents",
+      "description": "Reusable prompts/skills for the autonomous pipeline. POC: pr-review extracted from .github/workflows/pr-review.yml."
+    }
+  ]
+}
