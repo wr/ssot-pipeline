@@ -32,7 +32,7 @@ import agentSessionCreated from "./fixtures/webhook_agent_session_created.json";
 const SECRET = "test-secret";
 const SSOT_REPO = "wr/ssot-pipeline";
 const SSOT_PROJECT_ID = "f9eb7447-31fb-4e02-b46b-7d147f2d0f55";
-const PLAN_MARKER_LINE = "### 📋 Plan • react 👍 to approve";
+const PLAN_MARKER_LINE = "### 📋 Plan";
 
 // Always restore fetch between tests so a broken stub from one test doesn't
 // leak into another.
