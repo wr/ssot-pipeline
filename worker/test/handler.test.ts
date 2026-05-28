@@ -598,6 +598,37 @@ describe("AgentSessionEvent (W-243)", () => {
     expect(mock.calls.length).toBe(0);
   });
 
+  it("prompted (enabled, no stop) → comments the reply, fires linear-replan", async () => {
+    const mock = installFetchMock([
+      {
+        match: (u, init) => u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("commentCreate"),
+        respond: () => new Response(JSON.stringify({ data: { commentCreate: { success: true, comment: { id: "cmt-1" } } } }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      },
+      { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    handleAgentSessionEvent(
+      { action: "prompted", agentSession: { id: "s-p", issueId: "uuid-1", issue: { identifier: "W-260", project: { id: SSOT_PROJECT_ID } } }, agentActivity: { body: "also handle the edge case", signal: null } },
+      fakeEnv,
+      "t",
+      ctx,
+      true,
+    );
+    await settled();
+
+    const comment = mock.calls.find((c) => c.url.includes("api.linear.app/graphql") && c.body!.includes("commentCreate"));
+    expect(comment).toBeDefined();
+    expect(JSON.parse(comment!.body!).variables.input.issueId).toBe("uuid-1");
+    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
+    expect(dispatch).toBeDefined();
+    const d = JSON.parse(dispatch!.body!);
+    expect(d.event_type).toBe("linear-replan");
+    expect(d.client_payload.issue_id).toBe("W-260");
+    expect(d.client_payload.comment_id).toBe("cmt-1");
+  });
+
   it("created for an unmapped project → posts an error activity, no dispatch", async () => {
     const mock = installFetchMock([
       { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },

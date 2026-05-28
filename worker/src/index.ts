@@ -502,6 +502,7 @@ export type AgentSessionEvent = {
   action?: string; // "created" | "prompted"
   agentSession?: {
     id?: string;
+    issueId?: string;
     issue?: { id?: string; identifier?: string; project?: { id?: string } };
   };
   agentActivity?: { body?: string; signal?: string | null };
@@ -542,9 +543,9 @@ export function handleAgentSessionEvent(
     return;
   }
 
-  // The foundation only bridges the initial delegation (`created`). Non-stop
-  // `prompted` follow-ups are logged but not yet acted on.
-  if (action !== "created") {
+  // We bridge the initial delegation (`created`) and mid-session follow-ups
+  // (`prompted`); anything else is logged and ignored.
+  if (action !== "created" && action !== "prompted") {
     log("info", "agent_session_unhandled_action", { trace, action: action ?? null, session_id: sessionId ?? null });
     return;
   }
@@ -554,16 +555,16 @@ export function handleAgentSessionEvent(
     return;
   }
 
-  // The `created` payload doesn't reliably inline the issue's project, so we
-  // resolve identifier + project from Linear when needed. agent_session_created
-  // logs the actual payload shape (keys) for observability.
+  // The payload often omits the issue's project (and sometimes the identifier),
+  // so they're resolved from Linear in the async body. agent_session_event logs
+  // the actual payload shape for observability.
   const rawIssue = event.agentSession?.issue;
-  const issueRef = rawIssue?.identifier ?? rawIssue?.id ?? null;
-  log("info", "agent_session_created", {
+  log("info", "agent_session_event", {
     trace,
     session_id: sessionId,
+    action,
     agent_session_keys: Object.keys(event.agentSession ?? {}),
-    issue_ref: issueRef,
+    issue_ref: rawIssue?.identifier ?? rawIssue?.id ?? null,
     inline_project: rawIssue?.project?.id ?? null,
   });
 
@@ -572,29 +573,46 @@ export function handleAgentSessionEvent(
       // Immediate ack so the session shows activity inside the ~10s SLA.
       await postAgentActivity(sessionId, { type: "thought", body: "On it — taking a look at this issue." }, env, trace);
 
-      // Resolve identifier + project (the webhook often omits the project).
-      let issueId = rawIssue?.identifier ?? null;
-      let projectId = rawIssue?.project?.id ?? null;
-      if (issueRef && (!issueId || !projectId)) {
-        const fetched = await fetchIssueProject(issueRef, env, trace);
-        issueId = issueId ?? fetched.identifier;
-        projectId = projectId ?? fetched.projectId;
-      }
-
+      const { issueId, projectId } = await resolveAgentSessionIssue(event, env, trace);
       const repo = projectId ? resolveRepo(projectId, `agent session ${sessionId}`, trace) : null;
       if (!repo || !issueId) {
         await postAgentActivity(
           sessionId,
-          { type: "error", body: "I couldn't map this issue to a repo wired to the SSOT pipeline, so I can't pick it up automatically." },
+          { type: "error", body: "I couldn't map this issue to a repo wired to the SSOT pipeline, so I can't act on it automatically." },
           env,
           trace,
         );
         return;
       }
 
-      log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-pickup" });
-      await fireDispatch(repo, "linear-pickup", { issue_id: issueId, trace_id: trace }, env, trace);
-      await postAgentActivity(sessionId, { type: "response", body: `Picking up ${issueId} — I'll post a plan shortly for your review.` }, env, trace);
+      if (action === "created") {
+        // Initial delegation → plan the issue.
+        log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-pickup" });
+        await fireDispatch(repo, "linear-pickup", { issue_id: issueId, trace_id: trace }, env, trace);
+        await postAgentActivity(sessionId, { type: "response", body: `Picking up ${issueId} — I'll post a plan shortly for your review.` }, env, trace);
+        return;
+      }
+
+      // `prompted` follow-up → materialize the reply as a Linear comment and
+      // re-plan off it, reusing the existing linear-replan flow (which reads the
+      // instruction from a comment id). commentCreate needs the issue UUID.
+      const issueUuid = event.agentSession?.issueId ?? rawIssue?.id ?? null;
+      const promptText = event.agentActivity?.body?.trim() || "(follow-up from agent session)";
+      const commentId = issueUuid
+        ? await postIssueComment(issueUuid, `Follow-up via agent session:\n\n${promptText}`, env, trace)
+        : null;
+      if (!commentId) {
+        await postAgentActivity(
+          sessionId,
+          { type: "error", body: "I couldn't record your follow-up to re-plan from — try commenting on the issue directly." },
+          env,
+          trace,
+        );
+        return;
+      }
+      log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-replan" });
+      await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: commentId, trace_id: trace }, env, trace);
+      await postAgentActivity(sessionId, { type: "response", body: `Got it — re-planning ${issueId} with your guidance.` }, env, trace);
     })().catch((err) =>
       log("error", "agent_session_bridge_failed", {
         trace,
@@ -637,6 +655,54 @@ async function fetchIssueProject(
       error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
     return { identifier: null, projectId: null };
+  }
+}
+
+// Resolve an agent session's issue identifier + project id, querying Linear when
+// the webhook payload omits them (it usually omits the project). Shared by the
+// created (→pickup) and prompted (→replan) bridges.
+async function resolveAgentSessionIssue(
+  event: AgentSessionEvent,
+  env: Env,
+  trace: string,
+): Promise<{ issueId: string | null; projectId: string | null }> {
+  const rawIssue = event.agentSession?.issue;
+  const issueRef = rawIssue?.identifier ?? rawIssue?.id ?? null;
+  let issueId = rawIssue?.identifier ?? null;
+  let projectId = rawIssue?.project?.id ?? null;
+  if (issueRef && (!issueId || !projectId)) {
+    const fetched = await fetchIssueProject(issueRef, env, trace);
+    issueId = issueId ?? fetched.identifier;
+    projectId = projectId ?? fetched.projectId;
+  }
+  return { issueId, projectId };
+}
+
+// Create a Linear comment on an issue (by UUID) as the agent, returning the new
+// comment id. Used by the prompted-follow-up bridge to feed the user's reply
+// into linear-replan (which reads its instruction from a comment). Best-effort.
+async function postIssueComment(issueUuid: string, body: string, env: Env, trace: string): Promise<string | null> {
+  const mutation = `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id } } }`;
+  try {
+    const resp = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: mutation, variables: { input: { issueId: issueUuid, body } } }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = (await resp.json()) as { data?: { commentCreate?: { comment?: { id?: string } } }; errors?: unknown };
+    if (data.errors) {
+      log("error", "agent_comment_create_errors", { trace, issue_uuid: issueUuid, errors: data.errors });
+      return null;
+    }
+    return data.data?.commentCreate?.comment?.id ?? null;
+  } catch (err) {
+    log("error", "agent_comment_create_failed", {
+      trace,
+      issue_uuid: issueUuid,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+    return null;
   }
 }
 
