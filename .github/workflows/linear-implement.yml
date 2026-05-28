@@ -145,6 +145,12 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         env:
           MAX_THINKING_TOKENS: '10000'
+          # Opt in to the plugin's Stop-hook early verify (W-238). The hook calls
+          # the Worker /verify?kind=implement and blocks once so the agent attaches
+          # a missing PR / flips a missed state before finishing. The if:always()
+          # verify step below stays the authoritative backstop. ISSUE + CONFIG_URL
+          # come from job env.
+          SSOT_VERIFY_KIND: implement
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           additional_permissions: |

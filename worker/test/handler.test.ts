@@ -591,3 +591,56 @@ describe("GET /verify — pickup post-conditions", () => {
     expect(v.pass).toBe(true);
   });
 });
+
+describe("GET /verify — implement post-conditions", () => {
+  const linearIssueAttach = (stateName: string, urls: string[]): Response =>
+    new Response(
+      JSON.stringify({
+        data: {
+          issue: {
+            state: { name: stateName },
+            comments: { nodes: [] },
+            attachments: { nodes: urls.map((u) => ({ url: u })) },
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  it("passes when a GitHub PR is attached and the issue is in In Review", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("linear.app"), respond: () => linearIssueAttach("In Review", ["https://github.com/wr/ssot-pipeline/pull/99"]) },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=implement");
+    const v = (await resp.json()) as { pass: boolean };
+    expect(v.pass).toBe(true);
+  });
+
+  it("fails with reasons when no PR is attached and the state is wrong", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("linear.app"), respond: () => linearIssueAttach("In Progress", ["https://example.com/not-a-pr"]) },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=implement");
+    const v = (await resp.json()) as { pass: boolean; reason: string };
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("PR attached");
+    expect(v.reason).toContain("In Review");
+  });
+
+  it("flags only the state when a PR is attached but the state is wrong", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("linear.app"), respond: () => linearIssueAttach("Done", ["https://github.com/wr/ssot-pipeline/pull/100"]) },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=implement");
+    const v = (await resp.json()) as { pass: boolean; reason: string };
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("In Review");
+    expect(v.reason).not.toContain("PR attached");
+  });
+});
