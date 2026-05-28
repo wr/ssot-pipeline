@@ -143,6 +143,7 @@ jobs:
           git -C "$RUNNER_TEMP/ssot-plugin" sparse-checkout set plugins/ssot-agents
 
       - uses: anthropics/claude-code-action@v1
+        id: claude
         env:
           MAX_THINKING_TOKENS: '10000'
           # Opt in to the plugin's Stop-hook early verify (W-238). The hook calls
@@ -173,6 +174,7 @@ jobs:
             --model claude-opus-4-7
             --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "mcp__linear__create_attachment" "mcp__github__get_pull_request" "mcp__github__pull_request_read" "mcp__github__list_pull_requests" "Bash" "Read" "Write" "Edit" "Grep" "Glob"
             --disallowedTools "Bash(rm *)" "Bash(rm:*)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push --force*)" "Bash(git push -f*)" "Bash(git push --force-with-lease*)" "Bash(git push --mirror*)" "Bash(git push --delete*)" "Bash(git push *:*)" "Bash(git push * --delete*)" "Bash(git remote add *)" "Bash(git remote set-url *)" "Bash(git reset --hard origin/main*)" "Bash(git update-ref -d *)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh repo transfer*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh api -X DELETE*)" "Bash(gh api --method DELETE*)" "Bash(gh auth*)" "Bash(gh ssh-key*)" "Bash(gh gpg-key*)" "WebFetch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
+            --json-schema '{"type":"object","additionalProperties":false,"required":["pr_opened","pr_url","state_set","summary","blockers"],"properties":{"pr_opened":{"type":"boolean"},"pr_url":{"type":"string"},"state_set":{"type":"boolean"},"summary":{"type":"string","maxLength":500},"blockers":{"type":"array","items":{"type":"string"},"maxItems":20}}}'
 
       - name: Verify outcome
         id: verify
@@ -184,6 +186,7 @@ jobs:
           STUCK_STATE: ${{ steps.cfg.outputs.stuck_state }}
           BRANCH_PREFIX: ${{ steps.cfg.outputs.branch_prefix }}
           GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
           # Auto-replan cap: max total automated retries we'll dispatch for one
           # issue across runs. Counted by scanning prior Stuck-context comments
           # on the issue (magic prefix `## 🚨 Stuck context — trace`). If a
@@ -228,7 +231,33 @@ jobs:
           # never loop indefinitely.
           PRIOR_STUCK_COUNT=$(echo "$RESP" | jq '[.data.issue.comments.nodes[] | select(.body | startswith("## 🚨 Stuck context — trace"))] | length')
 
+          # Parse Claude's structured self-report (additive cross-check). The
+          # world-state assertions below stay authoritative — a self-reported
+          # success can't override a missing/mismatched PR. We log it, warn on
+          # disagreement, and fold any self-reported blockers into the Stuck
+          # context for richer diagnostics. Mirrors linear-pickup's pattern.
+          SO_PR_OPENED=""
+          SO_BLOCKERS_INLINE=""
+          if [ -n "${STRUCTURED_OUTPUT:-}" ] && echo "$STRUCTURED_OUTPUT" | jq -e . >/dev/null 2>&1; then
+            SO_PR_OPENED=$(echo "$STRUCTURED_OUTPUT" | jq -r '.pr_opened // empty')
+            SO_STATE_SET=$(echo "$STRUCTURED_OUTPUT" | jq -r '.state_set // empty')
+            SO_PR_URL=$(echo "$STRUCTURED_OUTPUT" | jq -r '.pr_url // empty')
+            SO_SUMMARY=$(echo "$STRUCTURED_OUTPUT" | jq -r '.summary // empty')
+            SO_BLOCKERS_INLINE=$(echo "$STRUCTURED_OUTPUT" | jq -r '(.blockers // []) | join("; ")')
+            echo "structured_output: pr_opened=$SO_PR_OPENED state_set=$SO_STATE_SET pr_url=$SO_PR_URL"
+            echo "summary: $SO_SUMMARY"
+            [ -n "$SO_BLOCKERS_INLINE" ] && echo "self-reported blockers: $SO_BLOCKERS_INLINE"
+          else
+            echo "structured_output not present — relying on world-state checks only"
+          fi
+
           echo "trace=${TRACE} verify: state=$STATE expected=$EXPECT_STATE pr_attachments=$PR_COUNT prior_stuck_ctx=$PRIOR_STUCK_COUNT"
+
+          # Cross-check: a self-report of pr_opened with nothing attached almost
+          # always means the attach (mcp__linear__create_attachment) step failed.
+          if [ "$SO_PR_OPENED" = "true" ] && [ "$PR_COUNT" -eq 0 ]; then
+            echo "::warning::structured_output reports pr_opened=true but no PR is attached to $ISSUE — attach step likely failed (trace=${TRACE})"
+          fi
 
           FAIL_REASONS=""
           # FAIL_SHAPES is a space-separated list of mechanically-recognizable
@@ -337,6 +366,12 @@ jobs:
 
           NEXT_ACTION_LINE="$( [ "$DO_REPLAN" = "1" ] && echo "dispatching linear-replan (auto-retry $NEXT_ATTEMPT / $AUTO_REPLAN_MAX)" || echo "flipping to Stuck — $REPLAN_SKIP_REASON" )"
           EXTRA_HEADER=$(printf '**Prior auto-retries:** %d / %d' "$PRIOR_STUCK_COUNT" "$AUTO_REPLAN_MAX")
+
+          # Fold Claude's own blocker self-report into the Stuck context — it
+          # often explains *why* the world-state checks above failed.
+          if [ -n "$SO_BLOCKERS_INLINE" ]; then
+            FAIL_REASONS="${FAIL_REASONS}\n- Claude self-reported: ${SO_BLOCKERS_INLINE}"
+          fi
 
           # Hand off to the next step. Stuck-context comment is posted by the
           # linear-stuck-flip composite (flip_state=false — orchestration below

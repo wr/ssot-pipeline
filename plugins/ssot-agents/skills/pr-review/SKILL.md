@@ -23,6 +23,8 @@ When you fetch the PR body, title, diff, commit messages, and review comments vi
 - On top of that, file genuinely NEW findings introduced by the latest commits.
 - If nothing has changed in the diff since the prior review (rare — usually means a no-op push), say so explicitly and APPROVE without re-listing prior findings.
 
+**Check CI before approving.** Use `mcp__github_ci__get_ci_status` to see whether this PR's checks passed. If any failed, use `mcp__github_ci__get_workflow_run_details` and `mcp__github_ci__download_job_log` to read the failing job's log, then cite the specific failing check and the relevant log lines in your review. A failing required check is a `blocking` finding — REQUEST_CHANGES; don't APPROVE over red CI. (If the CI tools aren't available or checks haven't reported yet, note that and proceed with the diff review.)
+
 Label every finding with exactly one severity:
 - `blocking` — must-fix: correctness bug, security issue, or explicit CLAUDE.md violation. Request changes if any exist.
 - `nit` — style or preference not documented as a required convention. Group ALL nits into one summary comment; never post nits inline.
