@@ -19,15 +19,14 @@ Before deploying a fork, update `config/pipeline.json` with your own values — 
 
 | Field | What to set |
 |---|---|
-| `approved_user_ids` | Your Linear user ID (find it via the Linear API or in your profile URL) |
+| `approved_user_ids` | Linear user IDs (UUIDs) whose approval counts when `enforce_approved_users` is `true`; matched against the agent-session creator. Leave `[]` to rely on the GitHub merge as the sign-off gate |
+| `enforce_approved_users` | When `true`, gate agent-session reply-approval on `approved_user_ids`. Default `false` |
 | `branch_prefix` | Your preferred branch prefix, e.g. `yourname/` |
 | `review_bot_login` | `<your-handle>-claude-reviewer[bot]` — the GitHub App you create for reviews |
 | `fix_reviewer_logins` | `["<your-handle>-claude-reviewer[bot]"]` — same App, plus your own GitHub login if you want human reviews to trigger auto-fix too |
-| `approval_emojis` | Linear emoji names that count as plan approval via reaction (default `["+1", "white_check_mark"]`) |
-| `approval_phrases` | Comment phrases/emoji that count as approval when replied to a plan (default `["ship it", "lgtm", "looks good", "approved", "go for it", "👍", "✅"]`) |
-| `approval_ack_emoji` | Linear emoji name the Worker uses as 🤖 read-receipt (default `"robot_face"`) |
+| `approval_phrases` | Reply phrases/emoji in an agent session that count as approval to implement (default `["ship it", "lgtm", "looks good", "approved", "go for it", "👍", "✅"]`) |
 | `pr_fix_max_attempts` | Hard cap on auto-fix iterations per PR before flipping to Stuck (default `2`) |
-| `todo_ai_state`, `planning_state`, `plan_review_state`, `in_progress_state`, `in_review_state`, `stuck_state` | Names of the Linear workflow states the pipeline drives. Defaults match the names this repo uses — change them only if your Linear workspace uses different state names |
+| `planning_state`, `plan_review_state`, `in_progress_state`, `in_review_state`, `stuck_state` | Names of the Linear workflow states the pipeline drives. Defaults match the names this repo uses — change them only if your Linear workspace uses different state names |
 | `linear_mcp_url`, `linear_mcp_transport` | Linear's MCP endpoint. Defaults are correct unless Linear changes them |
 | `project_to_repo` | Clear this (`{}`) — `init-target-repo.sh` populates it per project |
 

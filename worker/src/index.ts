@@ -97,34 +97,6 @@ export function resolveRepo(projectId: string | undefined, label: string, trace:
   return repo;
 }
 
-// Decide whether an Issue.update event represents an actual state transition
-// (vs. a different field changing while the issue already sits in this state).
-// Returns true when the event should be processed, false when it should be
-// skipped (and logs the skip reason at the call site label).
-//
-// Defensive: when `updatedFrom` is absent entirely (null/undefined), we fire
-// anyway — better one extra plan than zero. We log it so any regressions in
-// Linear's webhook payload shape are visible. `create` events have no
-// `updatedFrom` and always count as a transition.
-export function isStateTransition(event: LinearEvent, label: string, trace: string): boolean {
-  if (event.action !== "update") return true;
-  const uf = event.updatedFrom;
-  if (uf === undefined || uf === null) {
-    log("info", "state_transition_missing_updated_from", { trace, label, decision: "fire" });
-    return true;
-  }
-  if (!("state" in uf) && !("stateId" in uf)) {
-    log("info", "state_transition_skip", {
-      trace,
-      label,
-      reason: "no_state_change",
-      updated_from_keys: Object.keys(uf),
-    });
-    return false;
-  }
-  return true;
-}
-
 async function handleLinearWebhook(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = await req.text();
   const signature = req.headers.get("Linear-Signature") ?? "";
@@ -236,15 +208,7 @@ async function handleLinearWebhook(req: Request, env: Env, ctx: ExecutionContext
       handleAgentSessionEvent(event as unknown as AgentSessionEvent, env, trace, ctx);
       return new Response("ok");
     }
-    if (event.type === "Issue" && (event.action === "update" || event.action === "create")) {
-      await handleIssueUpdate(event, env, trace);
-    } else if (event.type === "Reaction" && event.action === "create") {
-      await handleReactionCreate(event, env, trace);
-    } else if (event.type === "Comment" && event.action === "create") {
-      await handleCommentCreate(event, env, trace);
-    } else {
-      log("info", "webhook_ignored", { trace, event_type: event.type, event_action: event.action });
-    }
+    log("info", "webhook_ignored", { trace, event_type: event.type, event_action: event.action });
     return new Response("ok");
   } catch (err) {
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
@@ -269,220 +233,6 @@ export async function verifySignature(
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
   const expected = bytesToHex(new Uint8Array(sig));
   return timingSafeEqual(expected, signatureHex);
-}
-
-async function handleIssueUpdate(event: LinearEvent, env: Env, trace: string): Promise<void> {
-  const issue = event.data as LinearIssue;
-  const stateName = issue.state?.name;
-  const issueProjectId = issue.projectId || issue.project?.id;
-
-  if (stateName === config.todo_ai_state) {
-    // Dedupe: only fire on the *transition into* Todo (AI), not on every update
-    // while the issue sits there. Linear sends multiple events for a new issue
-    // (create + updates as project/priority/etc. settle) — without this, each
-    // one re-fires pickup and we get duplicate Plan comments.
-    if (!isStateTransition(event, `issue ${issue.identifier}`, trace)) {
-      return;
-    }
-
-    const repo = resolveRepo(issueProjectId, `issue ${issue.identifier}`, trace);
-    if (!repo) return;
-
-    log("info", "dispatch_decision", {
-      trace,
-      issue_id: issue.identifier,
-      event_type: "linear-pickup",
-      action: event.action,
-    });
-    await fireDispatch(repo, "linear-pickup", { issue_id: issue.identifier, trace_id: trace }, env, trace);
-
-    try {
-      await postReaction({ issueId: issue.id }, config.approval_ack_emoji, env, trace);
-    } catch (err) {
-      log("error", "ack_reaction_failed", {
-        trace,
-        target: "issue",
-        issue_id: issue.identifier,
-        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-      });
-    }
-  } else if (stateName === config.in_progress_state) {
-    // Human manually moved issue to In Progress — treat as plan approval.
-    // Gate on actorId to prevent the workflow's own "Flip to In Progress" step
-    // (which runs under the Linear app token) from looping back here.
-    if (!event.actorId || !(config.approved_user_ids as string[]).includes(event.actorId)) {
-      log("info", "in_progress_skip", {
-        trace,
-        issue_id: issue.identifier,
-        reason: "non_approved_actor",
-        actor_id: event.actorId ?? null,
-      });
-      return;
-    }
-
-    // Must be an actual state transition, not a different field update.
-    if (!isStateTransition(event, `issue ${issue.identifier} (In Progress)`, trace)) {
-      return;
-    }
-
-    const repo = resolveRepo(issueProjectId, `issue ${issue.identifier}`, trace);
-    if (!repo) return;
-
-    log("info", "dispatch_decision", {
-      trace,
-      issue_id: issue.identifier,
-      event_type: "linear-implement",
-      reason: "manual_in_progress",
-      actor_id: event.actorId,
-    });
-    await fireDispatch(repo, "linear-implement", { issue_id: issue.identifier, trace_id: trace }, env, trace);
-  } else {
-    log("info", "issue_state_not_actionable", {
-      trace,
-      issue_id: issue.identifier,
-      state: stateName ?? null,
-    });
-  }
-}
-
-async function handleReactionCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
-  const reaction = event.data as LinearReaction;
-
-  if (!(config.approval_emojis as string[]).includes(reaction.emoji)) return;
-  if (!config.approved_user_ids.includes(reaction.userId)) return;
-  if (!reaction.commentId) return;
-
-  const comment = await fetchComment(reaction.commentId, env);
-  if (!comment) {
-    log("info", "reaction_skip", {
-      trace,
-      reason: "comment_fetch_failed",
-      comment_id: reaction.commentId,
-    });
-    return;
-  }
-
-  if (!comment.body.startsWith(config.plan_marker)) {
-    log("info", "reaction_skip", {
-      trace,
-      reason: "non_plan_comment",
-      comment_id: reaction.commentId,
-    });
-    return;
-  }
-
-  const issueId = comment.issue?.identifier;
-  const projectId = comment.issue?.project?.id;
-  if (!issueId || !projectId) {
-    log("info", "reaction_skip", {
-      trace,
-      reason: "missing_issue_or_project",
-      comment_id: reaction.commentId,
-    });
-    return;
-  }
-
-  const repo = resolveRepo(projectId, `reaction on issue ${issueId}`, trace);
-  if (!repo) return;
-
-  await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace }, env, trace);
-
-  // Best-effort 🤖 ack on the plan comment so the user gets immediate visible
-  // confirmation. Errors are logged but never bubble.
-  try {
-    await postReaction({ commentId: reaction.commentId }, config.approval_ack_emoji, env, trace);
-  } catch (err) {
-    log("error", "ack_reaction_failed", {
-      trace,
-      target: "comment",
-      comment_id: reaction.commentId,
-      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-    });
-  }
-}
-
-async function handleCommentCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
-  const comment = event.data as LinearComment;
-
-  if (!comment.userId || !config.approved_user_ids.includes(comment.userId)) {
-    log("info", "comment_skip", {
-      trace,
-      reason: "non_approved_user",
-      user_id: comment.userId ?? null,
-    });
-    return;
-  }
-
-  if (!comment.parentId) {
-    log("info", "comment_skip", { trace, reason: "top_level_no_parent" });
-    return;
-  }
-
-  const parent = await fetchComment(comment.parentId, env);
-  if (!parent) {
-    log("info", "comment_skip", {
-      trace,
-      reason: "parent_fetch_failed",
-      parent_id: comment.parentId,
-    });
-    return;
-  }
-
-  if (!parent.body.startsWith(config.plan_marker)) {
-    log("info", "comment_skip", {
-      trace,
-      reason: "reply_to_non_plan",
-      parent_id: comment.parentId,
-    });
-    return;
-  }
-
-  const issueId = parent.issue?.identifier;
-  const projectId = parent.issue?.project?.id;
-  if (!issueId || !projectId) {
-    log("info", "comment_skip", {
-      trace,
-      reason: "missing_issue_or_project",
-      parent_id: comment.parentId,
-    });
-    return;
-  }
-
-  const repo = resolveRepo(projectId, `Comment.create on issue ${issueId}`, trace);
-  if (!repo) return;
-
-  const isApproval = (config.approval_phrases as string[]).some((phrase) => matchesApprovalPhrase(comment.body, phrase));
-
-  if (isApproval) {
-    log("info", "dispatch_decision", {
-      trace,
-      issue_id: issueId,
-      event_type: "linear-implement",
-      reason: "approval_phrase",
-      comment_id: comment.id,
-    });
-    await fireDispatch(repo, "linear-implement", { issue_id: issueId, approval_comment_id: comment.id, trace_id: trace }, env, trace);
-    return;
-  }
-
-  log("info", "dispatch_decision", {
-    trace,
-    issue_id: issueId,
-    event_type: "linear-replan",
-    comment_id: comment.id,
-  });
-  await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: comment.id, trace_id: trace }, env, trace);
-
-  try {
-    await postReaction({ commentId: comment.id }, config.approval_ack_emoji, env, trace);
-  } catch (err) {
-    log("error", "ack_reaction_failed", {
-      trace,
-      target: "comment",
-      comment_id: comment.id,
-      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-    });
-  }
 }
 
 // --- Agent Sessions (W-243) --------------------------------------------------
@@ -512,6 +262,7 @@ export type AgentSessionEvent = {
   agentSession?: {
     id?: string;
     issueId?: string;
+    creatorId?: string;
     issue?: { id?: string; identifier?: string; project?: { id?: string } };
   };
   agentActivity?: { body?: string; signal?: string | null; content?: { body?: string; signal?: string | null; type?: string } };
@@ -616,6 +367,22 @@ export function handleAgentSessionEvent(
         prompt_len: promptText.length,
       });
       if ((config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(promptText, p))) {
+        // Optional approval gate (OFF by default). When enforce_approved_users is
+        // true, only an approved session creator may green-light implementation;
+        // otherwise (default) the GitHub merge remains the real sign-off gate.
+        if ((config as { enforce_approved_users?: boolean }).enforce_approved_users === true) {
+          const creatorId = event.agentSession?.creatorId ?? "";
+          if (!(config.approved_user_ids as string[]).includes(creatorId)) {
+            log("info", "agent_session_approval_denied", { trace, session_id: sessionId, issue_id: issueId, creator_id: creatorId || null });
+            await postAgentActivity(
+              sessionId,
+              { type: "response", body: "Approval isn't authorized — only an approved user can green-light implementation for this issue." },
+              env,
+              trace,
+            );
+            return;
+          }
+        }
         log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-implement" });
         await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace, agent_session_id: sessionId }, env, trace);
         await postAgentActivity(sessionId, { type: "response", body: `Approved — building ${issueId} now. I'll open a PR for review.` }, env, trace);
@@ -781,108 +548,6 @@ export async function postAgentActivity(
     type: content.type,
     success: data.data?.agentActivityCreate?.success ?? null,
   });
-}
-
-async function postReaction(
-  target: { commentId: string } | { issueId: string },
-  emoji: string,
-  env: Env,
-  trace: string,
-): Promise<void> {
-  const isComment = "commentId" in target;
-  const id = isComment ? target.commentId : target.issueId;
-  const targetLabel = isComment ? `comment ${id}` : `issue ${id}`;
-
-  // Single mutation driven by a typed ReactionCreateInput — Linear's schema
-  // accepts either commentId or issueId on the same input type, so we don't
-  // need separate mutations for the two target shapes.
-  const mutation = `mutation($input: ReactionCreateInput!) {
-    reactionCreate(input: $input) { success }
-  }`;
-  const input: Record<string, string> = { emoji };
-  if (isComment) input.commentId = id;
-  else input.issueId = id;
-
-  const resp = await fetch("https://api.linear.app/graphql", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query: mutation, variables: { input } }),
-    signal: AbortSignal.timeout(8000),
-  });
-
-  const text = await resp.text();
-  if (!resp.ok) {
-    log("error", "reaction_create_failed", { trace, target: targetLabel, status: resp.status, body: text });
-    return;
-  }
-
-  let data: { data?: { reactionCreate?: { success?: boolean } }; errors?: unknown };
-  try {
-    data = JSON.parse(text);
-  } catch {
-    log("error", "reaction_create_bad_json", { trace, target: targetLabel, body: text });
-    return;
-  }
-
-  if (data.errors) {
-    log("error", "reaction_create_graphql_errors", { trace, target: targetLabel, errors: data.errors });
-    return;
-  }
-
-  log("info", "reaction_posted", {
-    trace,
-    target: targetLabel,
-    emoji,
-    success: data.data?.reactionCreate?.success ?? null,
-  });
-}
-
-async function fetchComment(commentId: string, env: Env): Promise<LinearComment | null> {
-  const query = `
-    query($id: String!) {
-      comment(id: $id) {
-        id
-        body
-        issue {
-          identifier
-          project { id }
-        }
-      }
-    }`;
-
-  const resp = await fetch("https://api.linear.app/graphql", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query, variables: { id: commentId } }),
-    signal: AbortSignal.timeout(8000),
-  });
-
-  const text = await resp.text();
-  if (!resp.ok) {
-    log("error", "linear_fetch_comment_failed", { status: resp.status, body: text });
-    return null;
-  }
-
-  let data: { data?: { comment?: LinearComment }; errors?: unknown };
-  try {
-    data = JSON.parse(text);
-  } catch {
-    log("error", "linear_fetch_comment_bad_json", { body: text });
-    return null;
-  }
-
-  if (data.errors) {
-    log("error", "linear_fetch_comment_graphql_errors", { errors: data.errors });
-    return null;
-  }
-
-  return data.data?.comment ?? null;
 }
 
 // GET /verify?issue=W-NN&kind=pickup|implement — assert a workflow's expected
@@ -1073,33 +738,5 @@ function timingSafeEqual(a: string, b: string): boolean {
 export type LinearEvent = {
   type: string;
   action: string;
-  actorId?: string;
-  data: unknown;
-  updatedFrom?: Record<string, unknown> | null;
   webhookTimestamp?: number;
-};
-
-type LinearIssue = {
-  id: string;
-  identifier: string;
-  projectId?: string;
-  project?: { id?: string };
-  state?: { name?: string };
-};
-
-type LinearReaction = {
-  emoji: string;
-  userId: string;
-  commentId?: string;
-};
-
-type LinearComment = {
-  id: string;
-  body: string;
-  parentId?: string;
-  userId?: string;
-  issue?: {
-    identifier?: string;
-    project?: { id?: string };
-  };
 };
