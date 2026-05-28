@@ -657,6 +657,27 @@ describe("AgentSessionEvent (W-243)", () => {
     expect(mock.calls.find((c) => c.body && c.body.includes("commentCreate"))).toBeUndefined();
   });
 
+  it("prompted approval nested under agentActivity.content.body → fires linear-implement", async () => {
+    // Real Linear payload nests the reply text under content.body (not flat .body).
+    const mock = installFetchMock([
+      { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    handleAgentSessionEvent(
+      { action: "prompted", agentSession: { id: "s-b", issueId: "uuid-3", issue: { identifier: "W-280", project: { id: SSOT_PROJECT_ID } } }, agentActivity: { content: { type: "prompt", body: "approve" } } },
+      fakeEnv,
+      "t",
+      ctx,
+      true,
+    );
+    await settled();
+    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
+    expect(dispatch).toBeDefined();
+    expect(JSON.parse(dispatch!.body!).event_type).toBe("linear-implement");
+  });
+
   it("created for an unmapped project → posts an error activity, no dispatch", async () => {
     const mock = installFetchMock([
       { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },

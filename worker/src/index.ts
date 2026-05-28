@@ -505,7 +505,7 @@ export type AgentSessionEvent = {
     issueId?: string;
     issue?: { id?: string; identifier?: string; project?: { id?: string } };
   };
-  agentActivity?: { body?: string; signal?: string | null };
+  agentActivity?: { body?: string; signal?: string | null; content?: { body?: string; signal?: string | null; type?: string } };
   promptContext?: string;
   webhookTimestamp?: number;
 };
@@ -536,9 +536,11 @@ export function handleAgentSessionEvent(
   const action = event.action;
   const sessionId = event.agentSession?.id;
 
-  // A user stopping the agent arrives as a `prompted` event carrying
-  // agentActivity.signal === "stop" (not action: "stopped").
-  if (action === "prompted" && event.agentActivity?.signal === "stop") {
+  // A user stopping the agent arrives as a `prompted` event carrying a "stop"
+  // signal. Linear nests activity fields under `.content` (flat `.signal` kept
+  // as a fallback).
+  const promptSignal = event.agentActivity?.content?.signal ?? event.agentActivity?.signal ?? null;
+  if (action === "prompted" && promptSignal === "stop") {
     log("info", "agent_session_stop", { trace, session_id: sessionId ?? null });
     return;
   }
@@ -594,8 +596,16 @@ export function handleAgentSessionEvent(
       }
 
       // `prompted` follow-up: an approval phrase builds it (in-session approval);
-      // anything else re-plans with the new guidance.
-      const promptText = event.agentActivity?.body?.trim() || "";
+      // anything else re-plans. Linear nests the reply text under
+      // agentActivity.content.body (flat .body kept as a fallback).
+      const promptText = (event.agentActivity?.content?.body ?? event.agentActivity?.body ?? "").trim();
+      log("info", "agent_prompted_activity", {
+        trace,
+        session_id: sessionId,
+        activity_keys: Object.keys(event.agentActivity ?? {}),
+        content_keys: Object.keys(event.agentActivity?.content ?? {}),
+        prompt_len: promptText.length,
+      });
       if ((config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(promptText, p))) {
         log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-implement" });
         await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace, agent_session_id: sessionId }, env, trace);
