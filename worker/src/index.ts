@@ -588,7 +588,7 @@ export function handleAgentSessionEvent(
       if (action === "created") {
         // Initial delegation → plan the issue.
         log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-pickup" });
-        await fireDispatch(repo, "linear-pickup", { issue_id: issueId, trace_id: trace }, env, trace);
+        await fireDispatch(repo, "linear-pickup", { issue_id: issueId, trace_id: trace, agent_session_id: sessionId }, env, trace);
         await postAgentActivity(sessionId, { type: "response", body: `Picking up ${issueId} — I'll post a plan shortly for your review.` }, env, trace);
         return;
       }
@@ -611,7 +611,7 @@ export function handleAgentSessionEvent(
         return;
       }
       log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-replan" });
-      await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: commentId, trace_id: trace }, env, trace);
+      await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: commentId, trace_id: trace, agent_session_id: sessionId }, env, trace);
       await postAgentActivity(sessionId, { type: "response", body: `Got it — re-planning ${issueId} with your guidance.` }, env, trace);
     })().catch((err) =>
       log("error", "agent_session_bridge_failed", {
