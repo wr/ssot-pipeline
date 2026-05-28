@@ -31,9 +31,13 @@ jobs:
       CONFIG_URL: ${{ inputs.config_url }}
       TRACE: ${{ github.event.client_payload.trace_id }}
       ISSUE: ${{ github.event.client_payload.issue_id }}
+      # Present only when pickup was triggered from a Linear agent session
+      # (delegate/@mention). Empty for the Todo (AI)/comment path, in which case
+      # the agent-activity steps below no-op and behavior is unchanged. See W-253.
+      AGENT_SESSION_ID: ${{ github.event.client_payload.agent_session_id }}
     steps:
       - name: Trace
-        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE}"
+        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE} agent_session=${AGENT_SESSION_ID:-<none>}"
 
       - uses: actions/checkout@v6
         with:
@@ -44,6 +48,15 @@ jobs:
         uses: wr/ssot-pipeline/.github/actions/fetch-pipeline-config@main
         with:
           config_url: ${{ env.CONFIG_URL }}
+
+      - name: Agent session — starting thought
+        # No-op unless this run came from an agent session (W-253).
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: thought
+          body: "Picking up ${{ env.ISSUE }} — reading the issue and drafting a plan."
 
       - name: Skip if plan already posted
         env:
@@ -156,6 +169,33 @@ jobs:
             --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "mcp__linear__list_issues" "mcp__linear__get_project" "mcp__linear__list_projects" "mcp__linear__list_documents" "mcp__linear__get_document" "Read" "Grep" "Glob"
             --disallowedTools "Bash" "Write" "Edit" "WebFetch" "WebSearch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["plan_posted","state_set","plan_summary","ambiguities","complexity"],"properties":{"plan_posted":{"type":"boolean"},"state_set":{"type":"boolean"},"plan_summary":{"type":"string","maxLength":500},"ambiguities":{"type":"array","items":{"type":"string"},"maxItems":20},"complexity":{"type":"string","enum":["S","M","L"]}}}'
+
+      - name: Agent session — post plan as elicitation
+        # When triggered from an agent session, surface the just-posted plan as
+        # an in-session `elicitation` so the user can approve / request changes
+        # in-session (W-253). The plan still lives as the Linear comment, which
+        # linear-implement reads. No-op for the Todo (AI)/comment path.
+        if: always() && env.AGENT_SESSION_ID != ''
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          PLAN_MARKER: ${{ steps.cfg.outputs.plan_marker }}
+        run: |
+          set -euo pipefail
+          GQL_URL=https://api.linear.app/graphql
+          AUTH="Authorization: Bearer ${LINEAR_APP_TOKEN}"
+          CT="Content-Type: application/json"
+          # Fetch the latest plan-marker comment (the plan Claude just posted).
+          RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){comments{nodes{body createdAt}}}}",variables:{id:$id}}')")
+          PLAN=$(echo "$RESP" | jq -r --arg m "$PLAN_MARKER" '[.data.issue.comments.nodes[] | select(.body | startswith($m))] | sort_by(.createdAt) | last | .body // ""')
+          if [ -z "$PLAN" ]; then
+            echo "no plan comment found — skipping in-session elicitation (trace=${TRACE})"
+            exit 0
+          fi
+          BODY=$(printf '%s\n\n---\nReply **approve** to build this, or reply with changes.' "$PLAN")
+          curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
+            -d "$(jq -nc --arg sid "$AGENT_SESSION_ID" --arg b "$BODY" '{query:"mutation($input: AgentActivityCreateInput!){agentActivityCreate(input:$input){success}}",variables:{input:{agentSessionId:$sid,content:{type:"elicitation",body:$b}}}}')" > /dev/null
+          echo "trace=${TRACE} posted plan elicitation to agent session ${AGENT_SESSION_ID}"
 
       - name: Verify outcome
         id: verify

@@ -575,6 +575,7 @@ describe("AgentSessionEvent (W-243)", () => {
     const dispatched = JSON.parse(dispatch!.body!);
     expect(dispatched.event_type).toBe("linear-pickup");
     expect(dispatched.client_payload.issue_id).toBe("W-300");
+    expect(dispatched.client_payload.agent_session_id).toBe("agent-session-test");
 
     const activities = mock.calls.filter(
       (c) => c.url.includes("api.linear.app/graphql") && c.body!.includes("agentActivityCreate"),
@@ -627,6 +628,7 @@ describe("AgentSessionEvent (W-243)", () => {
     expect(d.event_type).toBe("linear-replan");
     expect(d.client_payload.issue_id).toBe("W-260");
     expect(d.client_payload.comment_id).toBe("cmt-1");
+    expect(d.client_payload.agent_session_id).toBe("s-p");
   });
 
   it("created for an unmapped project → posts an error activity, no dispatch", async () => {

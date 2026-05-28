@@ -1,0 +1,57 @@
+# Post a Linear agent-session activity (thought / action / response /
+# elicitation / error) via the agentActivityCreate GraphQL mutation, using the
+# Linear app token — the same trusted-YAML-step pattern as the "Flip to
+# Planning" / "Post starting comment" steps (NOT routed through Claude's
+# restricted tool set).
+#
+# No-op when session_id is empty, so workflows can call it unconditionally:
+# events that came through the Todo (AI) / comment path carry no agent session
+# id and simply skip, leaving that path's behavior unchanged. See W-253.
+name: Post agent activity
+description: 'Post a Linear agent-session activity via agentActivityCreate. No-op when session_id is empty.'
+
+inputs:
+  linear_token:
+    description: 'Linear OAuth app token (LINEAR_APP_TOKEN secret).'
+    required: true
+  session_id:
+    description: 'Agent session id. When empty, the step is a no-op.'
+    required: false
+    default: ''
+  type:
+    description: 'Activity type: thought | response | elicitation | error (body-shaped content).'
+    required: true
+  body:
+    description: 'Activity body text.'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Post agent activity
+      shell: bash
+      env:
+        LINEAR_APP_TOKEN: ${{ inputs.linear_token }}
+        SESSION_ID: ${{ inputs.session_id }}
+        ACT_TYPE: ${{ inputs.type }}
+        ACT_BODY: ${{ inputs.body }}
+      run: |
+        set -euo pipefail
+        if [ -z "${SESSION_ID:-}" ]; then
+          echo "post-agent-activity: no session id — skipping ($ACT_TYPE)"
+          exit 0
+        fi
+        GQL_URL=https://api.linear.app/graphql
+        QUERY=$(jq -nc --arg sid "$SESSION_ID" --arg t "$ACT_TYPE" --arg b "$ACT_BODY" \
+          '{query:"mutation($input: AgentActivityCreateInput!){agentActivityCreate(input:$input){success}}",variables:{input:{agentSessionId:$sid,content:{type:$t,body:$b}}}}')
+        RESP=$(curl -sS -X POST "$GQL_URL" \
+          -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "$QUERY")
+        # Best-effort: log success/errors, never fail the workflow on a missed activity.
+        OK=$(echo "$RESP" | jq -r '.data.agentActivityCreate.success // empty')
+        if [ "$OK" = "true" ]; then
+          echo "post-agent-activity: posted $ACT_TYPE to session $SESSION_ID"
+        else
+          echo "::warning::post-agent-activity: $ACT_TYPE not confirmed — $(echo "$RESP" | jq -c '.errors // .data // "no body"')"
+        fi
