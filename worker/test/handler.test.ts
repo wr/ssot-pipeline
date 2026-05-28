@@ -520,3 +520,74 @@ describe("GET /health", () => {
     expect(await resp.text()).toBe("ok");
   });
 });
+
+// --- GET /verify (W-233 additive Stop-hook early-verify) --------------------
+// /verify only reports {pass, reason}; it never flips state or dispatches. The
+// plugin's Stop hook calls it to let the agent self-correct before finishing.
+// It fails OPEN (pass=true) on any error so it can never wedge a run — the
+// workflow's if:always() verify step remains the authoritative backstop.
+describe("GET /verify — pickup post-conditions", () => {
+  const linearIssue = (stateName: string, commentBodies: string[]): Response =>
+    new Response(
+      JSON.stringify({
+        data: {
+          issue: {
+            state: { name: stateName },
+            comments: { nodes: commentBodies.map((b) => ({ body: b })) },
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  it("passes when the plan is posted and the issue is in Plan Review", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("linear.app"), respond: () => linearIssue("Plan Review", [`${PLAN_MARKER_LINE}\nthe plan body`]) },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=pickup");
+    expect(resp.status).toBe(200);
+    const v = (await resp.json()) as { pass: boolean; reason: string };
+    expect(v.pass).toBe(true);
+  });
+
+  it("fails with an actionable reason when the plan is missing and the state is wrong", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("linear.app"), respond: () => linearIssue("Planning", ["a normal comment, no marker"]) },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=pickup");
+    const v = (await resp.json()) as { pass: boolean; reason: string };
+    expect(v.pass).toBe(false);
+    expect(v.reason).toContain("plan marker");
+    expect(v.reason).toContain("Plan Review");
+  });
+
+  it("no-ops (pass) for a kind it can't verify yet, without querying Linear", async () => {
+    const mock = installFetchMock([
+      { match: () => true, respond: () => { throw new Error("should not fetch for unknown kind"); } },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=pr-review");
+    const v = (await resp.json()) as { pass: boolean };
+    expect(v.pass).toBe(true);
+    expect(mock.calls.find((c) => c.url.includes("linear.app"))).toBeUndefined();
+  });
+
+  it("fails open (pass) when Linear returns errors, deferring to the backstop", async () => {
+    const mock = installFetchMock([
+      {
+        match: (u) => u.includes("linear.app"),
+        respond: () => new Response(JSON.stringify({ errors: [{ message: "boom" }] }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=pickup");
+    const v = (await resp.json()) as { pass: boolean };
+    expect(v.pass).toBe(true);
+  });
+});
