@@ -593,13 +593,22 @@ export function handleAgentSessionEvent(
         return;
       }
 
-      // `prompted` follow-up → materialize the reply as a Linear comment and
-      // re-plan off it, reusing the existing linear-replan flow (which reads the
-      // instruction from a comment id). commentCreate needs the issue UUID.
+      // `prompted` follow-up: an approval phrase builds it (in-session approval);
+      // anything else re-plans with the new guidance.
+      const promptText = event.agentActivity?.body?.trim() || "";
+      if ((config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(promptText, p))) {
+        log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-implement" });
+        await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace, agent_session_id: sessionId }, env, trace);
+        await postAgentActivity(sessionId, { type: "response", body: `Approved — building ${issueId} now. I'll open a PR for review.` }, env, trace);
+        return;
+      }
+
+      // Non-approval → materialize the reply as a Linear comment and re-plan off
+      // it, reusing the existing linear-replan flow (it reads the instruction
+      // from a comment id). commentCreate needs the issue UUID.
       const issueUuid = event.agentSession?.issueId ?? rawIssue?.id ?? null;
-      const promptText = event.agentActivity?.body?.trim() || "(follow-up from agent session)";
       const commentId = issueUuid
-        ? await postIssueComment(issueUuid, `Follow-up via agent session:\n\n${promptText}`, env, trace)
+        ? await postIssueComment(issueUuid, `Follow-up via agent session:\n\n${promptText || "(no additional text)"}`, env, trace)
         : null;
       if (!commentId) {
         await postAgentActivity(
