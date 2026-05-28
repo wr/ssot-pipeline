@@ -80,7 +80,17 @@ jobs:
 
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id team{states{nodes{id name}}}}}",variables:{id:$id}}')")
-          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
+
+          # Defensive: bail fast if Linear returned no .data.issue (most often
+          # LINEAR_APP_TOKEN revoked). Exiting here before Claude runs keeps us
+          # from wasting API spend on a doomed run.
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id // ""')
+          if [ -z "$ISSUE_UUID" ] || [ "$ISSUE_UUID" = "null" ]; then
+            echo "::error::Linear GraphQL returned no issue for ${ISSUE} (trace=${TRACE}). Most likely cause: LINEAR_APP_TOKEN revoked or scope-limited. Raw response below."
+            echo "$RESP" | jq . || echo "$RESP"
+            exit 1
+          fi
+
           IN_PROGRESS_UUID=$(echo "$RESP" | jq -r --arg n "$IN_PROGRESS_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
 
@@ -202,8 +212,18 @@ jobs:
           QUERY=$(jq -nc --arg id "$ISSUE" '{query:"query($id:String!){issue(id:$id){id state{name} attachments{nodes{url}} comments{nodes{body}} team{states{nodes{id name}}}}}",variables:{id:$id}}')
           RESP=$(curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" -d "$QUERY")
 
+          # Defensive: surface the Linear response when .data.issue is null so
+          # we get an actionable error rather than jq crashing on the diagnostic
+          # path. If we can't reach Linear, we can't flip to Stuck anyway — the
+          # ::error:: annotation is the signal.
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id // ""')
+          if [ -z "$ISSUE_UUID" ] || [ "$ISSUE_UUID" = "null" ]; then
+            echo "::error::Linear GraphQL returned no issue for ${ISSUE} (trace=${TRACE}). Most likely cause: LINEAR_APP_TOKEN revoked or scope-limited. Raw response below."
+            echo "$RESP" | jq . || echo "$RESP"
+            exit 1
+          fi
+
           STATE=$(echo "$RESP" | jq -r '.data.issue.state.name')
-          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id')
           PR_URLS=$(echo "$RESP" | jq -r '[.data.issue.attachments.nodes[] | select(.url | contains("github.com") and contains("/pull/")) | .url] | .[]')
           PR_COUNT=$(echo "$PR_URLS" | grep -c . || true)
           STUCK_UUID=$(echo "$RESP" | jq -r --arg n "$STUCK_STATE" '.data.issue.team.states.nodes[] | select(.name==$n) | .id')
