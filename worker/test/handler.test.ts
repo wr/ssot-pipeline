@@ -748,6 +748,16 @@ describe("GET /config", () => {
   });
 });
 
+describe("GET /version", () => {
+  it("returns the pipeline config version as JSON", async () => {
+    const resp = await SELF.fetch("https://worker.test/version");
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("Content-Type")).toBe("application/json");
+    const body = (await resp.json()) as { version: number };
+    expect(body.version).toBe(1);
+  });
+});
+
 describe("GET /health", () => {
   it("returns ok", async () => {
     const resp = await SELF.fetch("https://worker.test/health");

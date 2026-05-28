@@ -55,6 +55,15 @@ export default {
       });
     }
 
+    if (req.method === "GET" && url.pathname === "/version") {
+      return new Response(JSON.stringify({ version: config.version }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=60",
+        },
+      });
+    }
+
     if (req.method === "POST" && url.pathname === "/linear") {
       return handleLinearWebhook(req, env, ctx);
     }
