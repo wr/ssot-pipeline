@@ -47,9 +47,13 @@ jobs:
       CONFIG_URL: ${{ inputs.config_url }}
       TRACE: ${{ github.event.client_payload.trace_id }}
       ISSUE: ${{ github.event.client_payload.issue_id }}
+      # Present only when implement was triggered from a Linear agent session
+      # (in-session approval). Empty for the 👍/comment path → the agent-activity
+      # steps below no-op and behavior is unchanged. See W-253.
+      AGENT_SESSION_ID: ${{ github.event.client_payload.agent_session_id }}
     steps:
       - name: Trace
-        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE}"
+        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE} agent_session=${AGENT_SESSION_ID:-<none>}"
 
       - uses: actions/checkout@v6
         with:
@@ -124,6 +128,15 @@ jobs:
           START_COMMENT_ID=$(echo "$RESP" | jq -r '.data.commentCreate.comment.id // ""')
           echo "START_COMMENT_ID=${START_COMMENT_ID}" >> "$GITHUB_ENV"
           echo "trace=${TRACE} posted starting comment for $ISSUE (id=${START_COMMENT_ID})"
+
+      - name: Agent session — implementing thought
+        # No-op unless this run came from an agent session (W-253).
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: thought
+          body: "Implementing ${{ env.ISSUE }} — branching, coding, and opening a PR."
 
       - name: Write MCP config
         uses: wr/ssot-pipeline/.github/actions/write-mcp-config@main
@@ -325,6 +338,7 @@ jobs:
           if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PR_COUNT" -gt 0 ] && [ "$HEAD_OK" = "1" ] && [ "$CLOSES_OK" = "1" ]; then
             echo "✓ verification passed (matched PR: $MATCHED_PR)"
             echo "outcome=passed" >> "$GITHUB_OUTPUT"
+            echo "matched_pr=${MATCHED_PR}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -475,3 +489,22 @@ jobs:
           fi
 
           exit 1
+
+      - name: Agent session — done response
+        # Stream the PR-ready outcome back into the agent session (W-253).
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.outcome == 'passed'
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: response
+          body: "Done — opened ${{ steps.verify.outputs.matched_pr }} for review."
+
+      - name: Agent session — failure note
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.outcome == 'failed'
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: error
+          body: "I hit a problem implementing ${{ env.ISSUE }} — see the issue for details."

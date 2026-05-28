@@ -631,6 +631,32 @@ describe("AgentSessionEvent (W-243)", () => {
     expect(d.client_payload.agent_session_id).toBe("s-p");
   });
 
+  it("prompted with an approval phrase → fires linear-implement (no comment, no replan)", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    handleAgentSessionEvent(
+      { action: "prompted", agentSession: { id: "s-a", issueId: "uuid-2", issue: { identifier: "W-270", project: { id: SSOT_PROJECT_ID } } }, agentActivity: { body: "approve", signal: null } },
+      fakeEnv,
+      "t",
+      ctx,
+      true,
+    );
+    await settled();
+
+    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
+    expect(dispatch).toBeDefined();
+    const d = JSON.parse(dispatch!.body!);
+    expect(d.event_type).toBe("linear-implement");
+    expect(d.client_payload.issue_id).toBe("W-270");
+    expect(d.client_payload.agent_session_id).toBe("s-a");
+    // Approval path doesn't create a comment or fire replan.
+    expect(mock.calls.find((c) => c.body && c.body.includes("commentCreate"))).toBeUndefined();
+  });
+
   it("created for an unmapped project → posts an error activity, no dispatch", async () => {
     const mock = installFetchMock([
       { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },
