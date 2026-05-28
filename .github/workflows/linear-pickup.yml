@@ -27,6 +27,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      issues: read   # resolve-github-refs reads GitHub issues referenced by the Linear issue
     env:
       CONFIG_URL: ${{ inputs.config_url }}
       TRACE: ${{ github.event.client_payload.trace_id }}
@@ -122,6 +123,17 @@ jobs:
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg sid "$PLANNING_UUID" '{query:"mutation($id:String!,$sid:String!){issueUpdate(id:$id,input:{stateId:$sid}){success}}",variables:{id:$id,sid:$sid}}')" > /dev/null
           echo "trace=${TRACE} flipped $ISSUE to Planning"
 
+      - name: Resolve referenced GitHub issues
+        id: ghrefs
+        # Read-only, no-op-safe. Fetches any GitHub issue the Linear issue points
+        # at (#N / issue URL) so the agent can plan from the real task instead of
+        # spinning to reverse-engineer it. Output is injected into the prompt below.
+        if: env.ALREADY_PLANNED != '1'
+        uses: wr/ssot-pipeline/.github/actions/resolve-github-refs@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          issue: ${{ env.ISSUE }}
+
       - name: Write MCP config
         if: env.ALREADY_PLANNED != '1'
         uses: wr/ssot-pipeline/.github/actions/write-mcp-config@main
@@ -161,6 +173,7 @@ jobs:
 
             Issue ID: ${{ env.ISSUE }}
             Trace ID (for the trailer): ${{ env.TRACE }}
+            ${{ steps.ghrefs.outputs.refs_block }}
           claude_args: |
             --plugin-dir ${{ runner.temp }}/ssot-plugin/plugins/ssot-agents
             --mcp-config /tmp/mcp.json
