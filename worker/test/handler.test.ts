@@ -535,17 +535,28 @@ describe("AgentSessionEvent (W-243)", () => {
     expect(isAgentSessionPayload(null)).toBe(false);
   });
 
-  it("feature flag off → dormant: an AgentSessionEvent webhook does nothing", async () => {
-    // Real config ships agent_sessions_enabled:false, so the live handler no-ops:
-    // no GitHub dispatch and no Linear activity call (the DO dedup fetch is a DO
-    // stub call, not global fetch, so it never shows up here).
+  it("enabled=false → dormant: no waitUntil work, no calls", () => {
+    // Dormant behavior is asserted via explicit flag injection, NOT the ambient
+    // config value — so flipping agent_sessions_enabled on in config never breaks
+    // this test (it did, once: the deploy gate caught it).
     const mock = installFetchMock([{ match: () => true, respond: () => githubDispatchOkResponse() }]);
     cleanupFetch = mock.restore;
-    const body = JSON.stringify(agentSessionCreated);
+    const { ctx } = capturingCtx();
+    handleAgentSessionEvent(agentSessionCreated as unknown as AgentSessionEvent, fakeEnv, "t", ctx, false);
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("AgentSessionEvent webhook is routed end-to-end and returns 200", async () => {
+    // Flag-independent: a stop-signal event is a no-op under any flag value, so
+    // this exercises the Linear-Event header routing + HMAC/freshness/dedup path
+    // end-to-end without depending on whether the feature is currently enabled.
+    const mock = installFetchMock([{ match: () => true, respond: () => githubDispatchOkResponse() }]);
+    cleanupFetch = mock.restore;
+    const body = JSON.stringify({ action: "prompted", agentSession: { id: "s-route" }, agentActivity: { signal: "stop" } });
     const req = await buildWebhookRequest({ body, linearEvent: "AgentSessionEvent" });
     const resp = await SELF.fetch(req);
     expect(resp.status).toBe(200);
-    expect(mock.calls.length).toBe(0);
+    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
   });
 
   it("created (enabled) → thought ack, fires linear-pickup, then response", async () => {
