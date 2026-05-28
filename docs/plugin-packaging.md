@@ -148,3 +148,5 @@ Add a `/verify` endpoint to the Worker and a `Stop` hook that calls it, collapsi
 - Config flow: `.github/actions/fetch-pipeline-config/`, `.github/actions/write-mcp-config/`, `config/pipeline.json`, Worker `GET /config` (`worker/src/index.ts`)
 - [Claude Code plugins](https://code.claude.com/docs/en/plugins) · [plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces) · [skills](https://code.claude.com/docs/en/skills) · [hooks](https://code.claude.com/docs/en/hooks)
 - [claude-code-action issue #664](https://github.com/anthropics/claude-code-action/issues/664) — local marketplace path support
+
+<!-- smoke test: verifying plugin-based pr-review runs end-to-end; PR will be closed -->
