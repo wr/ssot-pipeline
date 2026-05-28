@@ -2,6 +2,7 @@
   "$schema": "./pipeline.schema.json",
   "version": 1,
   "plan_marker": "### 📋 Plan • react 👍 to approve",
+  "agent_sessions_enabled": false,
   "linear_mcp_url": "https://mcp.linear.app/mcp",
   "linear_mcp_transport": "http",
   "todo_ai_state": "Todo (AI)",
