@@ -135,9 +135,6 @@ jobs:
             Issue ID: ${{ env.ISSUE }}
             Trace ID (for the trailer in step 7): ${{ env.TRACE }}
             User's replan instruction is in comment ID: ${{ env.COMMENT_ID }}
-            Plan marker (use verbatim as the first line of your plan comment): ${{ steps.cfg.outputs.plan_marker }}
-            In-progress state name (for next_state in_progress): ${{ steps.cfg.outputs.in_progress_state }}
-            Plan-review state name (for next_state plan_review): ${{ steps.cfg.outputs.plan_review_state }}
           claude_args: |
             --plugin-dir ${{ runner.temp }}/ssot-plugin/plugins/ssot-agents
             --mcp-config /tmp/mcp.json

@@ -157,9 +157,6 @@ jobs:
 
             Issue ID: ${{ env.ISSUE }}
             Trace ID (for trailers and Linear comments): ${{ env.TRACE }}
-            Plan marker (identifies the approved plan comment): ${{ steps.cfg.outputs.plan_marker }}
-            Branch prefix: ${{ steps.cfg.outputs.branch_prefix }}
-            In-review state name to set: ${{ steps.cfg.outputs.in_review_state }}
             Approval comment ID (may be empty): ${{ github.event.client_payload.approval_comment_id }}
             Starting comment ID (parent for milestone replies; may be empty): ${{ env.START_COMMENT_ID }}
           claude_args: |
