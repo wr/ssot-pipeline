@@ -4,9 +4,12 @@ Linear's native **Agent Sessions** let a user delegate or @mention the `@claude`
 
 ## Status: live (activated + verified 2026-05-28)
 
-This repo ships the **Worker-side foundation** behind the `agent_sessions_enabled` config flag. It was **activated** in this deployment (`agent_sessions_enabled: true`) and verified end-to-end: delegating an issue to `@claude` fires the bridge → `linear-pickup` → plan, with thought/response activities in the session. Set the flag back to `false` (and redeploy) to disable. The richer "activities fully replace the plan-comment → 👍 UX" migration is intentionally **not** done yet — see [Deferred](#deferred).
+This repo ships native Agent Sessions support behind the `agent_sessions_enabled` config flag. It was **activated** in this deployment (`agent_sessions_enabled: true`) and verified end-to-end. Set the flag back to `false` (and redeploy) to disable. The legacy `Todo (AI)` / comment+👍 path is retained in parallel (hybrid) and unchanged.
 
-What the foundation does when enabled: on an `AgentSessionEvent` with `action: "created"` (a delegation/@mention), the Worker acks with a `thought` activity, bridges the issue into the existing loop by firing `linear-pickup`, and posts a `response` activity telling the user a plan is coming. A `prompted` event carrying `agentActivity.signal === "stop"` is treated as a stop (no-op). An issue whose project isn't in `project_to_repo` gets an `error` activity instead of silence.
+What happens when enabled:
+- **`created`** (delegate / @mention): the Worker acks with a `thought` and fires `linear-pickup`; `linear-pickup` posts a `thought` at start and the finished plan as an in-session **`elicitation`** ("reply approve / request changes"). The plan also lands as the Linear comment that `linear-implement` reads.
+- **`prompted`** (user replies in the session): an **approval phrase** (`approve` / `lgtm` / `ship it` / …) → fires `linear-implement`, which streams an "implementing" `thought` and a PR-ready `response` (or an `error`); any other reply → posted as a comment + fires `linear-replan`; `agentActivity.signal === "stop"` → no-op.
+- An issue whose project isn't in `project_to_repo` gets an `error` activity instead of silence. The Worker resolves the issue's project from Linear when the payload omits it (`fetchIssueProject`).
 
 Agent Sessions arrive on the same `/linear` endpoint with the same `Linear-Signature` / `Linear-Delivery` / `webhookTimestamp` shape, so the HMAC verification, freshness window, and per-delivery dedup all apply unchanged. Activities are posted with the existing `LINEAR_APP_TOKEN`.
 
@@ -24,11 +27,9 @@ To roll back: set the flag to `false` and redeploy. The handler returns immediat
 
 ## Deferred
 
-The foundation **bridges** Agent Sessions into the existing comment-based loop; it does not yet replace that UX. Out of scope here, as follow-ups:
+The native flow above (streamed activities + plan-as-elicitation + in-session approval + `prompted`→replan) shipped in W-253 and W-254. The plan still also lands as a Linear comment so `linear-implement` can read it. Remaining follow-ups:
 
-- **Activities instead of comments.** Have `linear-pickup` / `linear-implement` stream their progress as agent activities (and post the plan as an `elicitation` the user approves in-session) instead of plain Linear comments + the 👍 reaction. This changes the human approval experience and is a Worker↔workflow contract change — worth deciding deliberately.
-- **`prompted` follow-ups.** Non-stop `prompted` events (a user replying mid-session with more guidance) are currently logged but not acted on. Wiring them to `linear-replan` (or feeding them into an in-flight implement) is the natural next step.
-- **Session lifecycle states.** Linear manages `pending`/`active`/`awaitingInput`/`complete`/`stale` from emitted activities; we currently emit a minimal thought→response. Richer activity emission (per workflow step) would make the native UI more informative.
+- **Richer per-step streaming.** Workflows emit a start `thought` + an end `response`/`error` today; finer-grained `action` activities per step (and driving Linear's `active`/`awaitingInput`/`complete` lifecycle more precisely) would make the native UI more informative.
 
 ## API reference (as of 2026-05)
 
