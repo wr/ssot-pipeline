@@ -15,7 +15,7 @@ write to those systems happens under one of four identities:
 | `claude[bot]` (GitHub App)     | GitHub (commits, PRs, comments on target repos) | Installed via `claude-code-action`'s `/install-github-app` — token minted per-run via OIDC | Push to branches, open/update PRs in target repos                              |
 | `<your-handle>-claude-reviewer[bot]` (GitHub App) | GitHub (PR reviews — APPROVE / REQUEST_CHANGES) | `CLAUDE_REVIEWER_APP_ID` + `CLAUDE_REVIEWER_APP_KEY` (private key PEM) on each target repo | File reviews on PRs in installed repos (must be a separate App because GitHub blocks PR authors from approving their own PRs) |
 | `claude-dispatch` (GitHub PAT) | GitHub (`repository_dispatch` from Worker → target repos) | `GITHUB_DISPATCH_TOKEN` (fine-grained PAT) in Cloudflare Worker | Fire workflows in selected target repos (Actions: write, Contents: read)       |
-| `@wells` (human)               | Linear + GitHub (approval gates)         | Personal account — not a shared credential          | Sole approver: the Worker checks `approved_user_ids` in `config/pipeline.json` for plan reactions; PR merges go through GitHub branch protection |
+| `@wells` (human)               | GitHub (the sign-off gate) + Linear (optional in-session approval) | Personal account — not a shared credential          | Sole sign-off is the **GitHub PR merge** under `main` branch protection (PR + 1 approving review required, no force-push/deletion); nothing auto-merges and fork PRs don't receive the reviewer-App secrets. The in-session reply-approval is an *optional* gate, off by default (`enforce_approved_users: false`) — when enabled, the Worker checks the session creator against `approved_user_ids` in `config/pipeline.json` |
 
 The Worker itself runs on Cloudflare Workers and authenticates to Linear by
 verifying inbound webhook HMACs (`LINEAR_WEBHOOK_SECRET`) and to GitHub by
@@ -201,10 +201,12 @@ comment, exfiltrated, etc.):
 
 ## Operator checklist
 
-- [ ] Branch protection on `main` requires "Review from Code Owners" — without
-      this, `.github/CODEOWNERS` is documentation, not enforcement.
+- [ ] Branch protection on `main` is the sole sign-off gate: PR required + at
+      least 1 approving review, no force-push, no deletion. Nothing auto-merges,
+      so the human merge is what ships work.
 - [ ] Every 90 days: rotate all six secrets above.
 - [ ] After every personnel change (new collaborator, departure): re-audit
-      `approved_user_ids` in `config/pipeline.json`.
+      `approved_user_ids` in `config/pipeline.json` (only enforced when
+      `enforce_approved_users: true` — off by default).
 - [ ] Never paste a secret into a Linear comment or PR description — the
       loop echoes both back to Claude as context.

@@ -4,7 +4,7 @@ Linear's native **Agent Sessions** let a user delegate or @mention the `@claude`
 
 ## Status: live (activated + verified 2026-05-28)
 
-This repo ships native Agent Sessions support behind the `agent_sessions_enabled` config flag. It was **activated** in this deployment (`agent_sessions_enabled: true`) and verified end-to-end. Set the flag back to `false` (and redeploy) to disable. The legacy `Todo (AI)` / comment+👍 path is retained in parallel (hybrid) and unchanged.
+This repo ships native Agent Sessions support behind the `agent_sessions_enabled` config flag. It was **activated** in this deployment (`agent_sessions_enabled: true`) and verified end-to-end. Set the flag back to `false` (and redeploy) to disable. Agent Sessions are now the **only** entry path — the legacy `Todo (AI)` / comment+👍 trigger has been retired and its Worker handlers removed.
 
 What happens when enabled:
 - **`created`** (delegate / @mention): the Worker acks with a `thought` and fires `linear-pickup`; `linear-pickup` posts a `thought` at start and the finished plan as an in-session **`elicitation`** ("reply approve / request changes"). The plan also lands as the Linear comment that `linear-implement` reads.
@@ -18,7 +18,7 @@ Agent Sessions arrive on the same `/linear` endpoint with the same `Linear-Signa
 ## One-time setup to activate
 
 1. **Give the `@claude` Linear app agent capabilities.** In the OAuth app behind `LINEAR_APP_TOKEN` (`actor=app`), enable agent capabilities and add the `app:assignable` and `app:mentionable` scopes (workspace admin + re-consent).
-2. **Enable the right categories on the *app's* webhook.** On the `@claude` application's **own** webhook (in the app's developer settings, pointed at the Worker's `/linear`), enable **Issues, Comments, Reactions, and Agent session events**. This single webhook should carry everything; **delete any separate workspace-level webhook** to the Worker so events aren't delivered twice (and don't 401).
+2. **Enable the right category on the *app's* webhook.** On the `@claude` application's **own** webhook (in the app's developer settings, pointed at the Worker's `/linear`), enable **only Agent session events** — the Worker no longer handles the `Issue` / `Comment` / `Reaction` data categories. **Delete any separate workspace-level webhook** to the Worker so events aren't delivered twice (and don't 401).
 3. **Point the Worker at the *app* webhook's signing secret.** `cd worker && printf %s '<app-webhook-secret>' | npx wrangler secret put LINEAR_WEBHOOK_SECRET` — use the **app webhook's** signing secret, NOT a workspace webhook secret (see the gotcha above). Verify with `npx wrangler tail`: `/linear` events should return `200`, not `401`.
 4. **Flip the flag.** Set `"agent_sessions_enabled": true` in `config/pipeline.json`, commit, and push — `deploy-worker.yml` redeploys the Worker on push to `main`.
 5. **Try it.** Delegate a **fresh** issue (in a mapped project) to `@claude`. Expect a `thought` activity, a `linear-pickup` run, then a `response`; the plan lands as the usual plan comment. Note: re-delegating an issue that **already** had a session does *not* re-fire `created` — use a new issue to re-test.
