@@ -563,16 +563,19 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
   return data.data?.comment ?? null;
 }
 
-// GET /verify?issue=W-NN&kind=pickup — assert a workflow's expected
+// GET /verify?issue=W-NN&kind=pickup|implement — assert a workflow's expected
 // post-conditions and return { pass, reason }. Used by the ssot-agents plugin's
 // Stop hook to let the agent self-correct a wrong outcome *before* the run ends.
 // This is an ADDITIVE early-correction layer: each workflow's own `if: always()`
 // verify step remains the authoritative backstop (it owns the Stuck/auto-replan
 // orchestration). /verify never flips state or dispatches — it only reports.
 //
-// Scope (W-233 vertical slice): kind=pickup, which is fully Linear-side. Other
-// kinds return pass=true (no-op) so the hook never blocks a workflow it can't
-// yet assert. GitHub-side kinds (pr-review/pr-fix) are a follow-up.
+// Supported kinds are fully Linear-side (the Worker only has the Linear token):
+//   pickup    → plan comment posted + issue in plan-review state
+//   implement → GitHub PR attached + issue in in-review state
+// Any other kind returns pass=true (no-op) so the hook never blocks a workflow
+// it can't assert. GitHub-side kinds (pr-review/pr-fix) would need the Worker to
+// gain GitHub read scope — deliberately not pursued (see W-238).
 async function handleVerify(url: URL, env: Env): Promise<Response> {
   const issue = url.searchParams.get("issue") ?? "";
   const kind = url.searchParams.get("kind") ?? "";
@@ -582,13 +585,16 @@ async function handleVerify(url: URL, env: Env): Promise<Response> {
     });
 
   if (!issue) return json(true, "no issue supplied — skipping verify");
-  if (kind !== "pickup") return json(true, `no verifier for kind="${kind}" — skipping`);
+  if (kind !== "pickup" && kind !== "implement") {
+    return json(true, `no verifier for kind="${kind}" — skipping`);
+  }
 
   const query = `
     query($id: String!) {
       issue(id: $id) {
         state { name }
         comments { nodes { body } }
+        attachments { nodes { url } }
       }
     }`;
 
@@ -615,7 +621,13 @@ async function handleVerify(url: URL, env: Env): Promise<Response> {
   }
 
   const data = (await resp.json()) as {
-    data?: { issue?: { state?: { name?: string }; comments?: { nodes?: { body: string }[] } } };
+    data?: {
+      issue?: {
+        state?: { name?: string };
+        comments?: { nodes?: { body: string }[] };
+        attachments?: { nodes?: { url: string }[] };
+      };
+    };
     errors?: unknown;
   };
   if (data.errors || !data.data?.issue) {
@@ -623,21 +635,33 @@ async function handleVerify(url: URL, env: Env): Promise<Response> {
     return json(true, "Linear returned no issue — deferring to backstop verify");
   }
 
-  const state = data.data.issue.state?.name ?? "";
-  const nodes = data.data.issue.comments?.nodes ?? [];
-  const marker = config.plan_marker;
-  const expectState = config.plan_review_state;
-  const hasPlan = nodes.some((n) => typeof n.body === "string" && n.body.startsWith(marker));
-  const stateOk = state === expectState;
+  const issueData = data.data.issue;
+  const state = issueData.state?.name ?? "";
+  const missing: string[] = [];
 
-  if (stateOk && hasPlan) {
-    return json(true, "plan posted and issue in plan-review state");
+  if (kind === "pickup") {
+    // pickup succeeds when the plan comment is posted and the issue sits in plan-review.
+    const expectState = config.plan_review_state;
+    const hasPlan = (issueData.comments?.nodes ?? []).some(
+      (n) => typeof n.body === "string" && n.body.startsWith(config.plan_marker),
+    );
+    if (!hasPlan) missing.push(`no comment starting with the plan marker "${config.plan_marker}" — post the plan comment`);
+    if (state !== expectState) missing.push(`issue state is "${state}" but must be "${expectState}" — set it via mcp__linear__save_issue`);
+  } else {
+    // implement succeeds when a GitHub PR is attached and the issue sits in in-review.
+    // This is the Linear-observable core only — the workflow's backstop verify
+    // additionally checks the PR head-ref pattern and the Closes-trailer, which
+    // need GitHub API access the Worker doesn't have.
+    const expectState = config.in_review_state;
+    const hasPr = (issueData.attachments?.nodes ?? []).some(
+      (a) => typeof a.url === "string" && a.url.includes("github.com") && a.url.includes("/pull/"),
+    );
+    if (!hasPr) missing.push("no GitHub PR attached to the issue — open the PR and attach it via mcp__linear__create_attachment");
+    if (state !== expectState) missing.push(`issue state is "${state}" but must be "${expectState}" — set it via mcp__linear__save_issue`);
   }
 
-  const missing: string[] = [];
-  if (!hasPlan) missing.push(`no comment starting with the plan marker "${marker}" — post the plan comment`);
-  if (!stateOk) missing.push(`issue state is "${state}" but must be "${expectState}" — set it via mcp__linear__save_issue`);
-  log("info", "verify_fail", { issue, kind, state, has_plan: hasPlan });
+  if (missing.length === 0) return json(true, `${kind} post-conditions met`);
+  log("info", "verify_fail", { issue, kind, state });
   return json(false, missing.join("; "));
 }
 
