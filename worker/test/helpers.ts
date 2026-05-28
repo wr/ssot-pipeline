@@ -68,35 +68,11 @@ export async function buildWebhookRequest(opts: WebhookRequestOpts): Promise<Req
   });
 }
 
-// Build a stubbed Linear GraphQL comment-fetch response. The Worker only
-// reads `body`, `issue.identifier`, and `issue.project.id` from these.
-export function linearCommentResponse(args: {
-  id: string;
-  body: string;
-  issueIdentifier?: string;
-  projectId?: string;
-}): Response {
+// Generic Linear agentActivityCreate success response. The Worker only reads
+// `agentActivityCreate.success` from these.
+export function agentActivityOkResponse(): Response {
   return new Response(
-    JSON.stringify({
-      data: {
-        comment: {
-          id: args.id,
-          body: args.body,
-          issue: {
-            identifier: args.issueIdentifier,
-            project: { id: args.projectId },
-          },
-        },
-      },
-    }),
-    { status: 200, headers: { "Content-Type": "application/json" } },
-  );
-}
-
-// Generic Linear reactionCreate success response.
-export function linearReactionSuccessResponse(): Response {
-  return new Response(
-    JSON.stringify({ data: { reactionCreate: { success: true } } }),
+    JSON.stringify({ data: { agentActivityCreate: { success: true } } }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 }

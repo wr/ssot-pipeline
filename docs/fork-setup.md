@@ -15,12 +15,13 @@ Open `config/pipeline.json` and update these fields before doing anything else:
 
 | Field | What to set |
 |---|---|
-| `approved_user_ids` | Your Linear user ID. Find it: Settings → Account → Profile, or via the API (`curl -sS -X POST https://api.linear.app/graphql -H "Authorization: $LINEAR_APP_TOKEN" -H "Content-Type: application/json" -d '{"query":"{ viewer { id } }"}' \| jq -r '.data.viewer.id'`) |
+| `approved_user_ids` | Leave `[]` unless you set `enforce_approved_users: true`. When enforced, list the Linear user IDs whose agent-session reply approves implementation. Find an ID: Settings → Account → Profile, or via the API (`curl -sS -X POST https://api.linear.app/graphql -H "Authorization: $LINEAR_APP_TOKEN" -H "Content-Type: application/json" -d '{"query":"{ viewer { id } }"}' \| jq -r '.data.viewer.id'`) |
+| `enforce_approved_users` | Leave `false` (the GitHub merge is the real sign-off gate) unless you want to restrict who can approve in-session |
 | `branch_prefix` | Your preferred branch prefix, e.g. `yourname/` |
 | `review_bot_login` | `<your-handle>-claude-reviewer[bot]` (the App you'll create in step 4) |
 | `fix_reviewer_logins` | `["<your-handle>-claude-reviewer[bot]"]` — add your own GitHub login too if you want human-requested reviews to trigger auto-fix |
 | `project_to_repo` | Clear it: `{}` — `init-target-repo.sh` populates it per project |
-| `approval_emojis`, `approval_phrases`, `approval_ack_emoji` | Leave as-is or adjust to taste |
+| `approval_phrases` | Leave as-is or adjust to taste |
 
 Commit the changes:
 

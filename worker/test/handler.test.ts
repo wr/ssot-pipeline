@@ -1,7 +1,7 @@
-// Worker test harness — covers the Wave-2 surfaces that previously had zero
-// automated coverage: HMAC signature, freshness window, approval-phrase
-// word-boundary regex, isStateTransition, resolveRepo, DO dedup, and the
-// full dispatch routing pipeline driven by canned Linear webhook fixtures.
+// Worker test harness — covers HMAC signature, freshness window, approval-phrase
+// word-boundary regex, resolveRepo, DO dedup, and the agent-session dispatch
+// pipeline (the only remaining inbound path after the legacy Todo(AI)/reaction/
+// comment handlers were retired).
 
 import { SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   handleAgentSessionEvent,
   isAgentSessionPayload,
-  isStateTransition,
   log,
   lookupRepo,
   matchesApprovalPhrase,
@@ -20,23 +19,14 @@ import {
   type Env,
 } from "../src/index";
 import {
+  agentActivityOkResponse,
   buildWebhookRequest,
   githubDispatchOkResponse,
   installFetchMock,
-  linearCommentResponse,
-  linearReactionSuccessResponse,
   signWebhookBody,
 } from "./helpers";
 
 // JSON fixtures — kept as strings so we can sign them byte-for-byte.
-import issueCreateTodoAi from "./fixtures/webhook_issue_create_todo_ai.json";
-import issueUpdateIntoTodoAi from "./fixtures/webhook_issue_update_into_todo_ai.json";
-import issueUpdateAlreadyTodoAi from "./fixtures/webhook_issue_update_already_todo_ai.json";
-import issueUpdateUnmappedProject from "./fixtures/webhook_issue_update_unmapped_project.json";
-import reactionThumbsup from "./fixtures/webhook_reaction_thumbsup.json";
-import reactionWrongUser from "./fixtures/webhook_reaction_wrong_user.json";
-import commentShipIt from "./fixtures/webhook_comment_ship_it.json";
-import commentReplan from "./fixtures/webhook_comment_replan.json";
 import agentSessionCreated from "./fixtures/webhook_agent_session_created.json";
 
 const SECRET = "test-secret";
@@ -142,57 +132,6 @@ describe("matchesApprovalPhrase", () => {
   });
 });
 
-describe("isStateTransition", () => {
-  const trace = "test1234";
-
-  it("returns true for create events (no updatedFrom)", () => {
-    expect(
-      isStateTransition({ type: "Issue", action: "create", data: {} }, "issue X-1", trace),
-    ).toBe(true);
-  });
-
-  it("returns true for update events whose updatedFrom includes state/stateId", () => {
-    expect(
-      isStateTransition(
-        { type: "Issue", action: "update", data: {}, updatedFrom: { stateId: "old" } },
-        "issue X-1",
-        trace,
-      ),
-    ).toBe(true);
-    expect(
-      isStateTransition(
-        { type: "Issue", action: "update", data: {}, updatedFrom: { state: { name: "Backlog" } } },
-        "issue X-1",
-        trace,
-      ),
-    ).toBe(true);
-  });
-
-  it("returns false for update events whose updatedFrom lacks state", () => {
-    // This is the dedup that keeps Linear's flurry of updates while an issue
-    // sits in Todo (AI) from re-firing pickup.
-    expect(
-      isStateTransition(
-        { type: "Issue", action: "update", data: {}, updatedFrom: { priority: 3 } },
-        "issue X-1",
-        trace,
-      ),
-    ).toBe(false);
-  });
-
-  it("defensively returns true when updatedFrom is missing entirely", () => {
-    // If Linear's payload shape changes and updatedFrom drops, fire anyway —
-    // an extra plan beats a silent miss.
-    expect(
-      isStateTransition(
-        { type: "Issue", action: "update", data: {} },
-        "issue X-1",
-        trace,
-      ),
-    ).toBe(true);
-  });
-});
-
 describe("resolveRepo / lookupRepo", () => {
   it("returns the configured repo for a known projectId", () => {
     expect(lookupRepo(SSOT_PROJECT_ID)).toBe(SSOT_REPO);
@@ -237,7 +176,7 @@ describe("verifySignature", () => {
 
 describe("POST /linear — signature + freshness gate", () => {
   it("rejects with 401 when signature is missing", async () => {
-    const body = JSON.stringify({ ...issueCreateTodoAi, webhookTimestamp: Date.now() });
+    const body = JSON.stringify({ ...agentSessionCreated, webhookTimestamp: Date.now() });
     const req = new Request("https://worker.test/linear", {
       method: "POST",
       headers: {
@@ -251,14 +190,14 @@ describe("POST /linear — signature + freshness gate", () => {
   });
 
   it("rejects with 401 for a bad signature", async () => {
-    const body = JSON.stringify(issueCreateTodoAi);
+    const body = JSON.stringify(agentSessionCreated);
     const req = await buildWebhookRequest({ body, signature: "deadbeef" });
     const resp = await SELF.fetch(req);
     expect(resp.status).toBe(401);
   });
 
   it("rejects with 401 when webhookTimestamp is missing from the body", async () => {
-    const body = JSON.stringify(issueCreateTodoAi);
+    const body = JSON.stringify(agentSessionCreated);
     const req = await buildWebhookRequest({ body, timestamp: null });
     const resp = await SELF.fetch(req);
     expect(resp.status).toBe(401);
@@ -266,7 +205,7 @@ describe("POST /linear — signature + freshness gate", () => {
   });
 
   it("rejects with 401 for a stale webhookTimestamp (>5min old)", async () => {
-    const body = JSON.stringify(issueCreateTodoAi);
+    const body = JSON.stringify(agentSessionCreated);
     const staleTs = Date.now() - 10 * 60 * 1000; // 10 min ago
     const req = await buildWebhookRequest({ body, timestamp: staleTs });
     const resp = await SELF.fetch(req);
@@ -275,7 +214,7 @@ describe("POST /linear — signature + freshness gate", () => {
   });
 
   it("rejects with 401 for a far-future webhookTimestamp (>5min ahead)", async () => {
-    const body = JSON.stringify(issueCreateTodoAi);
+    const body = JSON.stringify(agentSessionCreated);
     const futureTs = Date.now() + 10 * 60 * 1000;
     const req = await buildWebhookRequest({ body, timestamp: futureTs });
     const resp = await SELF.fetch(req);
@@ -283,12 +222,12 @@ describe("POST /linear — signature + freshness gate", () => {
   });
 
   it("rejects with 400 when Linear-Delivery is missing", async () => {
-    const body = JSON.stringify(issueCreateTodoAi);
+    const body = JSON.stringify(agentSessionCreated);
     const req = await buildWebhookRequest({ body, deliveryId: null });
     // Mock outbound — this should fail before reaching dispatch but be safe.
     const mock = installFetchMock([
       { match: (u) => u.includes("github.com"), respond: () => githubDispatchOkResponse() },
-      { match: (u) => u.includes("linear.app"), respond: () => linearReactionSuccessResponse() },
+      { match: (u) => u.includes("linear.app"), respond: () => agentActivityOkResponse() },
     ]);
     cleanupFetch = mock.restore;
     const resp = await SELF.fetch(req);
@@ -296,206 +235,33 @@ describe("POST /linear — signature + freshness gate", () => {
   });
 });
 
-describe("POST /linear — routing + dispatch", () => {
-  it("Issue.create with Todo (AI) → fires linear-pickup to the mapped repo", async () => {
-    const body = JSON.stringify(issueCreateTodoAi);
-    const mock = installFetchMock([
-      { match: (u) => u.includes("github.com"), respond: () => githubDispatchOkResponse() },
-      { match: (u) => u.includes("linear.app"), respond: () => linearReactionSuccessResponse() },
-    ]);
-    cleanupFetch = mock.restore;
-
-    const req = await buildWebhookRequest({ body });
-    const resp = await SELF.fetch(req);
-    expect(resp.status).toBe(200);
-
-    const dispatchCall = mock.calls.find((c) => c.url.includes("github.com"));
-    expect(dispatchCall).toBeDefined();
-    expect(dispatchCall!.url).toBe(`https://api.github.com/repos/${SSOT_REPO}/dispatches`);
-    expect(dispatchCall!.method).toBe("POST");
-    const dispatched = JSON.parse(dispatchCall!.body!);
-    expect(dispatched.event_type).toBe("linear-pickup");
-    expect(dispatched.client_payload.issue_id).toBe("W-200");
-    expect(dispatched.client_payload.trace_id).toMatch(/^[0-9a-f]{8}$/);
-  });
-
-  it("Issue.update already in Todo (AI) (no state change) → no dispatch", async () => {
-    const body = JSON.stringify(issueUpdateAlreadyTodoAi);
-    const mock = installFetchMock([
-      { match: () => true, respond: () => githubDispatchOkResponse() },
-    ]);
-    cleanupFetch = mock.restore;
-
-    const req = await buildWebhookRequest({ body });
-    const resp = await SELF.fetch(req);
-    expect(resp.status).toBe(200);
-
-    expect(mock.calls.find((c) => c.url.includes("github.com/repos"))).toBeUndefined();
-  });
-
-  it("Issue.update for unmapped project → no dispatch", async () => {
-    const body = JSON.stringify(issueUpdateUnmappedProject);
-    const mock = installFetchMock([
-      { match: () => true, respond: () => githubDispatchOkResponse() },
-    ]);
-    cleanupFetch = mock.restore;
-
-    const req = await buildWebhookRequest({ body });
-    const resp = await SELF.fetch(req);
-    expect(resp.status).toBe(200);
-    expect(mock.calls.find((c) => c.url.includes("github.com/repos"))).toBeUndefined();
-  });
-
-  it("Reaction by non-approved user → no dispatch", async () => {
-    const body = JSON.stringify(reactionWrongUser);
-    const mock = installFetchMock([
-      { match: () => true, respond: () => githubDispatchOkResponse() },
-    ]);
-    cleanupFetch = mock.restore;
-
-    const req = await buildWebhookRequest({ body });
-    const resp = await SELF.fetch(req);
-    expect(resp.status).toBe(200);
-    expect(mock.calls.find((c) => c.url.includes("github.com/repos"))).toBeUndefined();
-  });
-
-  it("Reaction by approved user on a plan comment → fires linear-implement", async () => {
-    const body = JSON.stringify(reactionThumbsup);
-    const mock = installFetchMock([
-      {
-        match: (u, init) =>
-          u.includes("linear.app") &&
-          typeof init?.body === "string" &&
-          init.body.includes("query") &&
-          init.body.includes("comment(id:"),
-        respond: () =>
-          linearCommentResponse({
-            id: "comment-plan-1",
-            body: `${PLAN_MARKER_LINE}\n\nHere is the plan...`,
-            issueIdentifier: "W-201",
-            projectId: SSOT_PROJECT_ID,
-          }),
-      },
-      {
-        match: (u) => u.includes("linear.app"),
-        respond: () => linearReactionSuccessResponse(),
-      },
-      { match: (u) => u.includes("github.com"), respond: () => githubDispatchOkResponse() },
-    ]);
-    cleanupFetch = mock.restore;
-
-    const req = await buildWebhookRequest({ body });
-    const resp = await SELF.fetch(req);
-    expect(resp.status).toBe(200);
-
-    const dispatchCall = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
-    expect(dispatchCall).toBeDefined();
-    const dispatched = JSON.parse(dispatchCall!.body!);
-    expect(dispatched.event_type).toBe("linear-implement");
-    expect(dispatched.client_payload.issue_id).toBe("W-201");
-  });
-
-  it("Comment 'ship it!' reply to a plan comment → fires linear-implement with approval_comment_id", async () => {
-    const body = JSON.stringify(commentShipIt);
-    const mock = installFetchMock([
-      {
-        match: (u, init) =>
-          u.includes("linear.app") &&
-          typeof init?.body === "string" &&
-          init.body.includes("comment(id:"),
-        respond: () =>
-          linearCommentResponse({
-            id: "comment-plan-1",
-            body: `${PLAN_MARKER_LINE}\n\nHere is the plan...`,
-            issueIdentifier: "W-201",
-            projectId: SSOT_PROJECT_ID,
-          }),
-      },
-      { match: (u) => u.includes("linear.app"), respond: () => linearReactionSuccessResponse() },
-      { match: (u) => u.includes("github.com"), respond: () => githubDispatchOkResponse() },
-    ]);
-    cleanupFetch = mock.restore;
-
-    const req = await buildWebhookRequest({ body });
-    const resp = await SELF.fetch(req);
-    expect(resp.status).toBe(200);
-
-    const dispatchCall = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
-    expect(dispatchCall).toBeDefined();
-    const dispatched = JSON.parse(dispatchCall!.body!);
-    expect(dispatched.event_type).toBe("linear-implement");
-    expect(dispatched.client_payload.approval_comment_id).toBe("comment-reply-shipit");
-  });
-
-  it("Comment non-approval reply to plan → fires linear-replan", async () => {
-    const body = JSON.stringify(commentReplan);
-    const mock = installFetchMock([
-      {
-        match: (u, init) =>
-          u.includes("linear.app") &&
-          typeof init?.body === "string" &&
-          init.body.includes("comment(id:"),
-        respond: () =>
-          linearCommentResponse({
-            id: "comment-plan-1",
-            body: `${PLAN_MARKER_LINE}\n\nHere is the plan...`,
-            issueIdentifier: "W-201",
-            projectId: SSOT_PROJECT_ID,
-          }),
-      },
-      { match: (u) => u.includes("linear.app"), respond: () => linearReactionSuccessResponse() },
-      { match: (u) => u.includes("github.com"), respond: () => githubDispatchOkResponse() },
-    ]);
-    cleanupFetch = mock.restore;
-
-    const req = await buildWebhookRequest({ body });
-    const resp = await SELF.fetch(req);
-    expect(resp.status).toBe(200);
-
-    const dispatchCall = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
-    expect(dispatchCall).toBeDefined();
-    const dispatched = JSON.parse(dispatchCall!.body!);
-    expect(dispatched.event_type).toBe("linear-replan");
-    expect(dispatched.client_payload.comment_id).toBe("comment-reply-replan");
-  });
-});
-
 describe("POST /linear — DO dedup", () => {
   it("two webhooks with the same Linear-Delivery → second is deduped, only one dispatch", async () => {
     const mock = installFetchMock([
       { match: (u) => u.includes("github.com"), respond: () => githubDispatchOkResponse() },
-      { match: (u) => u.includes("linear.app"), respond: () => linearReactionSuccessResponse() },
+      { match: (u) => u.includes("linear.app"), respond: () => agentActivityOkResponse() },
     ]);
     cleanupFetch = mock.restore;
 
     // Pre-bake webhookTimestamp into the body so both requests share an
     // identical signed body (buildWebhookRequest would otherwise inject a
-    // fresh ts on each call, mismatching the signatures).
-    const body = JSON.stringify({ ...issueUpdateIntoTodoAi, webhookTimestamp: Date.now() });
+    // fresh ts on each call, mismatching the signatures). Uses the agent fixture
+    // + AgentSessionEvent header — the only remaining inbound dispatch path.
+    const body = JSON.stringify({ ...agentSessionCreated, webhookTimestamp: Date.now() });
     const sig = await signWebhookBody(body, SECRET);
     const deliveryId = `delivery-dedup-${crypto.randomUUID()}`;
+    const headers = {
+      "Content-Type": "application/json",
+      "Linear-Signature": sig,
+      "Linear-Delivery": deliveryId,
+      "Linear-Event": "AgentSessionEvent",
+    };
 
-    const req1 = new Request("https://worker.test/linear", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Linear-Signature": sig,
-        "Linear-Delivery": deliveryId,
-      },
-      body,
-    });
+    const req1 = new Request("https://worker.test/linear", { method: "POST", headers, body });
     const resp1 = await SELF.fetch(req1);
     expect(resp1.status).toBe(200);
 
-    const req2 = new Request("https://worker.test/linear", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Linear-Signature": sig,
-        "Linear-Delivery": deliveryId,
-      },
-      body,
-    });
+    const req2 = new Request("https://worker.test/linear", { method: "POST", headers, body });
     const resp2 = await SELF.fetch(req2);
     expect(resp2.status).toBe(200);
     const json2 = (await resp2.json()) as { deduped?: boolean };
@@ -523,11 +289,7 @@ describe("AgentSessionEvent (W-243)", () => {
     return { ctx, settled: async () => { await Promise.all(promises); } };
   }
   const fakeEnv = { LINEAR_APP_TOKEN: "linear-token", GITHUB_DISPATCH_TOKEN: "gh-token" } as unknown as Env;
-  const agentActivityOk = () =>
-    new Response(JSON.stringify({ data: { agentActivityCreate: { success: true } } }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+  const agentActivityOk = agentActivityOkResponse;
 
   it("isAgentSessionPayload detects agent payloads by presence of agentSession", () => {
     expect(isAgentSessionPayload({ agentSession: { id: "x" } })).toBe(true);
@@ -743,7 +505,7 @@ describe("GET /config", () => {
     expect(resp.status).toBe(200);
     expect(resp.headers.get("Content-Type")).toBe("application/json");
     const cfg = (await resp.json()) as Record<string, unknown>;
-    expect(cfg.todo_ai_state).toBe("Todo (AI)");
+    expect(cfg.plan_marker).toBe(PLAN_MARKER_LINE);
     expect((cfg.project_to_repo as Record<string, string>)[SSOT_PROJECT_ID]).toBe(SSOT_REPO);
   });
 });
