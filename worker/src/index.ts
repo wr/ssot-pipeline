@@ -502,7 +502,7 @@ export type AgentSessionEvent = {
   action?: string; // "created" | "prompted"
   agentSession?: {
     id?: string;
-    issue?: { identifier?: string; project?: { id?: string } };
+    issue?: { id?: string; identifier?: string; project?: { id?: string } };
   };
   agentActivity?: { body?: string; signal?: string | null };
   promptContext?: string;
@@ -554,33 +554,47 @@ export function handleAgentSessionEvent(
     return;
   }
 
-  const issueId = event.agentSession?.issue?.identifier;
-  const projectId = event.agentSession?.issue?.project?.id;
-  const repo = resolveRepo(projectId, `agent session ${sessionId}`, trace);
-
-  if (!repo || !issueId) {
-    // Nothing to bridge to — tell the user in-session rather than going silent.
-    ctx.waitUntil(
-      postAgentActivity(
-        sessionId,
-        { type: "error", body: "This issue isn't in a project wired to the SSOT pipeline, so I can't pick it up automatically." },
-        env,
-        trace,
-      ).catch(() => {}),
-    );
-    return;
-  }
-
-  log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-pickup" });
+  // The `created` payload doesn't reliably inline the issue's project, so we
+  // resolve identifier + project from Linear when needed. agent_session_created
+  // logs the actual payload shape (keys) for observability.
+  const rawIssue = event.agentSession?.issue;
+  const issueRef = rawIssue?.identifier ?? rawIssue?.id ?? null;
+  log("info", "agent_session_created", {
+    trace,
+    session_id: sessionId,
+    agent_session_keys: Object.keys(event.agentSession ?? {}),
+    issue_ref: issueRef,
+    inline_project: rawIssue?.project?.id ?? null,
+  });
 
   ctx.waitUntil(
     (async () => {
-      // 1. Immediate ack so the session shows activity inside the ~10s SLA.
-      await postAgentActivity(sessionId, { type: "thought", body: `Picking up ${issueId} — generating a plan.` }, env, trace);
-      // 2. Bridge into the existing loop (reuses the linear-pickup dispatch path).
+      // Immediate ack so the session shows activity inside the ~10s SLA.
+      await postAgentActivity(sessionId, { type: "thought", body: "On it — taking a look at this issue." }, env, trace);
+
+      // Resolve identifier + project (the webhook often omits the project).
+      let issueId = rawIssue?.identifier ?? null;
+      let projectId = rawIssue?.project?.id ?? null;
+      if (issueRef && (!issueId || !projectId)) {
+        const fetched = await fetchIssueProject(issueRef, env, trace);
+        issueId = issueId ?? fetched.identifier;
+        projectId = projectId ?? fetched.projectId;
+      }
+
+      const repo = projectId ? resolveRepo(projectId, `agent session ${sessionId}`, trace) : null;
+      if (!repo || !issueId) {
+        await postAgentActivity(
+          sessionId,
+          { type: "error", body: "I couldn't map this issue to a repo wired to the SSOT pipeline, so I can't pick it up automatically." },
+          env,
+          trace,
+        );
+        return;
+      }
+
+      log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-pickup" });
       await fireDispatch(repo, "linear-pickup", { issue_id: issueId, trace_id: trace }, env, trace);
-      // 3. Set expectations for the human.
-      await postAgentActivity(sessionId, { type: "response", body: `On it — I'll post a plan on ${issueId} shortly for your review.` }, env, trace);
+      await postAgentActivity(sessionId, { type: "response", body: `Picking up ${issueId} — I'll post a plan shortly for your review.` }, env, trace);
     })().catch((err) =>
       log("error", "agent_session_bridge_failed", {
         trace,
@@ -589,6 +603,41 @@ export function handleAgentSessionEvent(
       }),
     ),
   );
+}
+
+// Resolve a Linear issue's canonical identifier + project id from an issue
+// reference (identifier or UUID). Used by the agent-session bridge because the
+// AgentSessionEvent payload doesn't reliably inline the project. Best-effort:
+// returns nulls on any failure (caller posts an error activity).
+async function fetchIssueProject(
+  issueRef: string,
+  env: Env,
+  trace: string,
+): Promise<{ identifier: string | null; projectId: string | null }> {
+  const query = `query($id: String!) { issue(id: $id) { identifier project { id } } }`;
+  try {
+    const resp = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, variables: { id: issueRef } }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = (await resp.json()) as {
+      data?: { issue?: { identifier?: string; project?: { id?: string } } };
+    };
+    const issue = data.data?.issue;
+    return { identifier: issue?.identifier ?? null, projectId: issue?.project?.id ?? null };
+  } catch (err) {
+    log("error", "agent_issue_fetch_failed", {
+      trace,
+      issue_ref: issueRef,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+    return { identifier: null, projectId: null };
+  }
 }
 
 // Post an activity to an agent session via agentActivityCreate. Mirrors

@@ -614,9 +614,31 @@ describe("AgentSessionEvent (W-243)", () => {
     );
     await settled();
     expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
-    const err = mock.calls.find((c) => c.url.includes("api.linear.app/graphql"));
+    const err = mock.calls.find((c) => c.url.includes("api.linear.app/graphql") && c.body!.includes("\"type\":\"error\""));
     expect(err).toBeDefined();
     expect(JSON.parse(err!.body!).variables.input.content.type).toBe("error");
+  });
+
+  it("created without inline project → fetches it from Linear, then bridges", async () => {
+    const mock = installFetchMock([
+      {
+        match: (u, init) => u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("issue(id:"),
+        respond: () => new Response(JSON.stringify({ data: { issue: { identifier: "W-250", project: { id: SSOT_PROJECT_ID } } } }), { status: 200, headers: { "Content-Type": "application/json" } }),
+      },
+      { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    // Payload has the issue identifier but NO inline project (the real-world shape).
+    handleAgentSessionEvent({ action: "created", agentSession: { id: "s3", issue: { identifier: "W-250" } } }, fakeEnv, "t", ctx, true);
+    await settled();
+
+    const issueQuery = mock.calls.find((c) => c.url.includes("api.linear.app/graphql") && c.body!.includes("issue(id:"));
+    expect(issueQuery).toBeDefined();
+    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
+    expect(dispatch).toBeDefined();
+    expect(JSON.parse(dispatch!.body!).client_payload.issue_id).toBe("W-250");
   });
 
   it("postAgentActivity posts agentActivityCreate with the content input", async () => {
