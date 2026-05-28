@@ -143,8 +143,6 @@ jobs:
 
             Issue ID: ${{ env.ISSUE }}
             Trace ID (for the trailer): ${{ env.TRACE }}
-            Plan marker (use verbatim as the first line of your plan comment): ${{ steps.cfg.outputs.plan_marker }}
-            Plan-review state name to set: ${{ steps.cfg.outputs.plan_review_state }}
           claude_args: |
             --plugin-dir ${{ runner.temp }}/ssot-plugin/plugins/ssot-agents
             --mcp-config /tmp/mcp.json
