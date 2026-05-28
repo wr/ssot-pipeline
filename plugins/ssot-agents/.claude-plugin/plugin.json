@@ -1,0 +1,11 @@
+{
+  "name": "ssot-agents",
+  "description": "Agent skills for the SSOT Linear <-> Claude Code <-> GitHub pipeline. Proof-of-concept scope: pr-review. Design notes in docs/plugin-packaging.md (W-158).",
+  "version": "0.0.1",
+  "author": {
+    "name": "Wells Riley",
+    "email": "hi@wells.ee"
+  },
+  "homepage": "https://github.com/wr/ssot-pipeline",
+  "repository": "https://github.com/wr/ssot-pipeline"
+}
