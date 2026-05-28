@@ -117,3 +117,7 @@ Open identity gap: `GITHUB_TOKEN` can't push workflow file changes — it's forb
 | Trace IDs | Per-event, ephemeral (just a correlation handle) | One run |
 
 The Worker keeps **no persistent state** of its own. KV is not used. Everything is request-scoped or sourced from the imported config.
+
+## Agentic patterns reference
+
+For proposals to extend the loop with patterns drawn from the broader agentic-coding ecosystem (living plans, richer step-to-step handoff, granular progress comments, pre-commit self-check, accumulated conventions, failure-shape taxonomy), see [agentic-patterns.md](./agentic-patterns.md).
