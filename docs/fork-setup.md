@@ -78,15 +78,16 @@ security add-generic-password -U -s ssot-pipeline -a SSOT_WORKER_URL \
 ## 7. Configure the Linear webhook
 
 1. In your fork's Linear workspace: Settings → API → Applications → edit your `claude` app
-2. Set **Webhook URL** to: `https://<wrangler-name>.<your-cf-account>.workers.dev/linear`
-3. Subscribe to: `Issue`, `Reaction`, `Comment`
-4. Copy the signing secret Linear shows you, then set it on the Worker:
+2. Enable agent capability and add the `app:assignable` / `app:mentionable` scopes (workspace admin + re-consent)
+3. Set **Webhook URL** to: `https://<wrangler-name>.<your-cf-account>.workers.dev/linear`
+4. Enable **only** the **Agent session events** category — leave `Issue` / `Reaction` / `Comment` off; the Worker no longer handles them
+5. Copy the signing secret Linear shows you, then set it on the Worker. This must be the **app webhook's** signing secret (agent events are signed by the app, not a workspace webhook — the wrong secret gives a `401`):
 
    ```bash
    wrangler secret put LINEAR_WEBHOOK_SECRET
    ```
 
-See [`docs/linear-app-setup.md`](./linear-app-setup.md) for full Linear OAuth app setup.
+See [`docs/linear-app-setup.md`](./linear-app-setup.md) for full Linear OAuth app setup and [`docs/agent-sessions.md`](./agent-sessions.md) for the agent-session flow.
 
 ## 8. Set `CLOUDFLARE_API_TOKEN` on this repo
 
@@ -110,10 +111,10 @@ The script will:
 
 ## 10. Test the loop
 
-Create a Linear issue in your project and move it to `Todo (AI)`. Watch:
+Create a Linear issue in your project and delegate it to `@claude`. Watch:
 
-- `wrangler tail` — Worker receives the webhook, fires `repository_dispatch`
+- `wrangler tail` — Worker receives the `AgentSessionEvent`, fires `repository_dispatch`
 - `gh run view --log` on the target repo — `linear-pickup` runs, Claude posts a plan
-- Linear issue — plan comment appears, state flips to `Plan Review`
+- Linear issue — plan appears as an in-session elicitation (and a comment), state flips to `Plan Review`
 
-👍 the plan, and the implement cycle begins.
+Reply **approve** in the agent session, and the implement cycle begins.

@@ -23,4 +23,4 @@ See `README.md` for the user-facing intro and setup. See `docs/architecture.md` 
 ## Identities
 - `@claude` in Linear = the Linear OAuth app (actor=app). Token = `LINEAR_APP_TOKEN`.
 - `claude[bot]` in GitHub = the GitHub App installed via `claude-code-action`'s `/install-github-app`. Plus a second `claude-dispatch` GitHub App used by the Worker for `repository_dispatch` calls.
-- `@wells` = the human. Approval gates (👍 reaction in Linear, PR approval in GitHub) only count when authored by this user ID.
+- `@wells` = the human. The sign-off gate is the **GitHub PR merge** under `main` branch protection (nothing auto-merges). In-session reply-approval is an optional, off-by-default gate — only enforced when `enforce_approved_users: true`, which checks the session creator against `approved_user_ids` in `config/pipeline.json`.
