@@ -41,6 +41,10 @@
       "minLength": 1,
       "description": "Prefix that identifies a plan comment in Linear. Worker checks `comment.body.startsWith(plan_marker)` to decide whether reactions/replies count as plan interactions."
     },
+    "agent_sessions_enabled": {
+      "type": "boolean",
+      "description": "Feature flag (W-243) for Linear Agent Sessions. When true, the Worker routes AgentSessionEvent webhooks into the loop (acks with an activity + fires linear-pickup). Dormant by default — also requires the Linear app to have agent scopes + the 'Agent session events' webhook category enabled. See docs/agent-sessions.md."
+    },
     "linear_mcp_url": {
       "type": "string",
       "format": "uri",

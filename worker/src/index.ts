@@ -39,7 +39,7 @@ export function log(level: LogLevel, event: string, fields: Record<string, unkno
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/health") {
@@ -56,7 +56,7 @@ export default {
     }
 
     if (req.method === "POST" && url.pathname === "/linear") {
-      return handleLinearWebhook(req, env);
+      return handleLinearWebhook(req, env, ctx);
     }
 
     if (req.method === "GET" && url.pathname === "/verify") {
@@ -116,9 +116,10 @@ export function isStateTransition(event: LinearEvent, label: string, trace: stri
   return true;
 }
 
-async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
+async function handleLinearWebhook(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = await req.text();
   const signature = req.headers.get("Linear-Signature") ?? "";
+  const linearEvent = req.headers.get("Linear-Event") ?? "";
 
   if (!(await verifySignature(body, signature, env.LINEAR_WEBHOOK_SECRET))) {
     return new Response("invalid signature", { status: 401 });
@@ -212,6 +213,14 @@ async function handleLinearWebhook(req: Request, env: Env): Promise<Response> {
   });
 
   try {
+    if (linearEvent === "AgentSessionEvent" || isAgentSessionPayload(event)) {
+      // Native Linear Agent Sessions (W-243). Same endpoint + HMAC + dedup;
+      // routed here before the data-change switch because the payload carries
+      // `agentSession` and has no `type`. Returns fast — the slow ack/dispatch
+      // work runs in ctx.waitUntil to meet Linear's ~5s ack / ~10s activity SLA.
+      handleAgentSessionEvent(event as unknown as AgentSessionEvent, env, trace, ctx);
+      return new Response("ok");
+    }
     if (event.type === "Issue" && (event.action === "update" || event.action === "create")) {
       await handleIssueUpdate(event, env, trace);
     } else if (event.type === "Reaction" && event.action === "create") {
@@ -459,6 +468,170 @@ async function handleCommentCreate(event: LinearEvent, env: Env, trace: string):
       error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
   }
+}
+
+// --- Agent Sessions (W-243) --------------------------------------------------
+//
+// Linear's native Agent Sessions: when an issue is delegated to / @mentions the
+// @claude app, Linear auto-creates an agent session and POSTs an
+// AgentSessionEvent to this same /linear endpoint (same Linear-Signature /
+// Linear-Delivery / webhookTimestamp, so the HMAC + freshness + per-delivery
+// dedup in handleLinearWebhook all apply unchanged). Progress is reported back
+// with agentActivityCreate using the same LINEAR_APP_TOKEN as reactions.
+//
+// This is an ADDITIVE bridge, dormant unless `config.agent_sessions_enabled` is
+// true AND the Linear app has agent scopes + the "Agent session events" webhook
+// category enabled (one-time Linear-side setup — see docs/agent-sessions.md).
+// The full "activities replace the plan-comment→👍 UX" migration is out of
+// scope here; this only bridges a delegated issue into the existing loop.
+
+export type AgentActivityContent =
+  | { type: "thought"; body: string }
+  | { type: "response"; body: string }
+  | { type: "elicitation"; body: string }
+  | { type: "error"; body: string }
+  | { type: "action"; action: string; parameter?: string; result?: string };
+
+export type AgentSessionEvent = {
+  action?: string; // "created" | "prompted"
+  agentSession?: {
+    id?: string;
+    issue?: { identifier?: string; project?: { id?: string } };
+  };
+  agentActivity?: { body?: string; signal?: string | null };
+  promptContext?: string;
+  webhookTimestamp?: number;
+};
+
+// True when a parsed webhook body looks like an AgentSessionEvent. Used as a
+// fallback alongside the `Linear-Event: AgentSessionEvent` header — agent
+// payloads carry `agentSession` and have no `type` field.
+export function isAgentSessionPayload(e: unknown): boolean {
+  return typeof e === "object" && e !== null && "agentSession" in (e as Record<string, unknown>);
+}
+
+// Handle an AgentSessionEvent. Returns void synchronously (the slow ack/dispatch
+// work runs in ctx.waitUntil) so the webhook responds 200 inside Linear's ~5s
+// ack window and the first activity lands inside the ~10s SLA. `enabled`
+// defaults to the config flag but is injectable for testing.
+export function handleAgentSessionEvent(
+  event: AgentSessionEvent,
+  env: Env,
+  trace: string,
+  ctx: ExecutionContext,
+  enabled: boolean = (config as { agent_sessions_enabled?: boolean }).agent_sessions_enabled === true,
+): void {
+  if (!enabled) {
+    log("info", "agent_session_disabled", { trace, action: event.action ?? null });
+    return;
+  }
+
+  const action = event.action;
+  const sessionId = event.agentSession?.id;
+
+  // A user stopping the agent arrives as a `prompted` event carrying
+  // agentActivity.signal === "stop" (not action: "stopped").
+  if (action === "prompted" && event.agentActivity?.signal === "stop") {
+    log("info", "agent_session_stop", { trace, session_id: sessionId ?? null });
+    return;
+  }
+
+  // The foundation only bridges the initial delegation (`created`). Non-stop
+  // `prompted` follow-ups are logged but not yet acted on.
+  if (action !== "created") {
+    log("info", "agent_session_unhandled_action", { trace, action: action ?? null, session_id: sessionId ?? null });
+    return;
+  }
+
+  if (!sessionId) {
+    log("warn", "agent_session_no_id", { trace });
+    return;
+  }
+
+  const issueId = event.agentSession?.issue?.identifier;
+  const projectId = event.agentSession?.issue?.project?.id;
+  const repo = resolveRepo(projectId, `agent session ${sessionId}`, trace);
+
+  if (!repo || !issueId) {
+    // Nothing to bridge to — tell the user in-session rather than going silent.
+    ctx.waitUntil(
+      postAgentActivity(
+        sessionId,
+        { type: "error", body: "This issue isn't in a project wired to the SSOT pipeline, so I can't pick it up automatically." },
+        env,
+        trace,
+      ).catch(() => {}),
+    );
+    return;
+  }
+
+  log("info", "agent_session_bridge", { trace, session_id: sessionId, issue_id: issueId, event_type: "linear-pickup" });
+
+  ctx.waitUntil(
+    (async () => {
+      // 1. Immediate ack so the session shows activity inside the ~10s SLA.
+      await postAgentActivity(sessionId, { type: "thought", body: `Picking up ${issueId} — generating a plan.` }, env, trace);
+      // 2. Bridge into the existing loop (reuses the linear-pickup dispatch path).
+      await fireDispatch(repo, "linear-pickup", { issue_id: issueId, trace_id: trace }, env, trace);
+      // 3. Set expectations for the human.
+      await postAgentActivity(sessionId, { type: "response", body: `On it — I'll post a plan on ${issueId} shortly for your review.` }, env, trace);
+    })().catch((err) =>
+      log("error", "agent_session_bridge_failed", {
+        trace,
+        session_id: sessionId,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      }),
+    ),
+  );
+}
+
+// Post an activity to an agent session via agentActivityCreate. Mirrors
+// postReaction's error handling: logs and swallows failures (best-effort).
+export async function postAgentActivity(
+  agentSessionId: string,
+  content: AgentActivityContent,
+  env: Env,
+  trace: string,
+): Promise<void> {
+  const mutation = `mutation($input: AgentActivityCreateInput!) {
+    agentActivityCreate(input: $input) { success }
+  }`;
+
+  const resp = await fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query: mutation, variables: { input: { agentSessionId, content } } }),
+    signal: AbortSignal.timeout(8000),
+  });
+
+  const text = await resp.text();
+  if (!resp.ok) {
+    log("error", "agent_activity_failed", { trace, session_id: agentSessionId, type: content.type, status: resp.status, body: text });
+    return;
+  }
+
+  let data: { data?: { agentActivityCreate?: { success?: boolean } }; errors?: unknown };
+  try {
+    data = JSON.parse(text);
+  } catch {
+    log("error", "agent_activity_bad_json", { trace, session_id: agentSessionId, body: text });
+    return;
+  }
+
+  if (data.errors) {
+    log("error", "agent_activity_graphql_errors", { trace, session_id: agentSessionId, errors: data.errors });
+    return;
+  }
+
+  log("info", "agent_activity_posted", {
+    trace,
+    session_id: agentSessionId,
+    type: content.type,
+    success: data.data?.agentActivityCreate?.success ?? null,
+  });
 }
 
 async function postReaction(

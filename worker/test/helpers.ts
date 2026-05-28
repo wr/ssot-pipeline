@@ -36,6 +36,8 @@ export interface WebhookRequestOpts {
   signature?: string;
   timestamp?: number | null;
   deliveryId?: string | null;
+  // When set, sent as the `Linear-Event` header (e.g. "AgentSessionEvent").
+  linearEvent?: string;
 }
 
 export async function buildWebhookRequest(opts: WebhookRequestOpts): Promise<Request> {
@@ -55,6 +57,9 @@ export async function buildWebhookRequest(opts: WebhookRequestOpts): Promise<Req
   };
   if (opts.deliveryId !== null) {
     headers["Linear-Delivery"] = opts.deliveryId ?? `delivery-${crypto.randomUUID()}`;
+  }
+  if (opts.linearEvent !== undefined) {
+    headers["Linear-Event"] = opts.linearEvent;
   }
   return new Request("https://worker.test/linear", {
     method: "POST",

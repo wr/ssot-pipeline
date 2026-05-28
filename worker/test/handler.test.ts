@@ -7,12 +7,17 @@ import { SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  handleAgentSessionEvent,
+  isAgentSessionPayload,
   isStateTransition,
   log,
   lookupRepo,
   matchesApprovalPhrase,
+  postAgentActivity,
   resolveRepo,
   verifySignature,
+  type AgentSessionEvent,
+  type Env,
 } from "../src/index";
 import {
   buildWebhookRequest,
@@ -32,6 +37,7 @@ import reactionThumbsup from "./fixtures/webhook_reaction_thumbsup.json";
 import reactionWrongUser from "./fixtures/webhook_reaction_wrong_user.json";
 import commentShipIt from "./fixtures/webhook_comment_ship_it.json";
 import commentReplan from "./fixtures/webhook_comment_replan.json";
+import agentSessionCreated from "./fixtures/webhook_agent_session_created.json";
 
 const SECRET = "test-secret";
 const SSOT_REPO = "wr/ssot-pipeline";
@@ -497,6 +503,122 @@ describe("POST /linear — DO dedup", () => {
 
     const dispatches = mock.calls.filter((c) => c.url.includes("api.github.com/repos"));
     expect(dispatches.length).toBe(1);
+  });
+});
+
+// --- AgentSessionEvent (W-243) ----------------------------------------------
+// The native Linear Agent Sessions bridge. Dormant unless agent_sessions_enabled
+// is true; the enabled-path tests call handleAgentSessionEvent directly with a
+// capturing ExecutionContext so we can await the waitUntil ack/dispatch work.
+
+describe("AgentSessionEvent (W-243)", () => {
+  // Fake ExecutionContext that captures waitUntil promises so tests can await
+  // the background ack/dispatch work the handler schedules.
+  function capturingCtx(): { ctx: ExecutionContext; settled: () => Promise<void> } {
+    const promises: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => { promises.push(p); },
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+    return { ctx, settled: async () => { await Promise.all(promises); } };
+  }
+  const fakeEnv = { LINEAR_APP_TOKEN: "linear-token", GITHUB_DISPATCH_TOKEN: "gh-token" } as unknown as Env;
+  const agentActivityOk = () =>
+    new Response(JSON.stringify({ data: { agentActivityCreate: { success: true } } }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  it("isAgentSessionPayload detects agent payloads by presence of agentSession", () => {
+    expect(isAgentSessionPayload({ agentSession: { id: "x" } })).toBe(true);
+    expect(isAgentSessionPayload({ type: "Issue", action: "create" })).toBe(false);
+    expect(isAgentSessionPayload(null)).toBe(false);
+  });
+
+  it("feature flag off → dormant: an AgentSessionEvent webhook does nothing", async () => {
+    // Real config ships agent_sessions_enabled:false, so the live handler no-ops:
+    // no GitHub dispatch and no Linear activity call (the DO dedup fetch is a DO
+    // stub call, not global fetch, so it never shows up here).
+    const mock = installFetchMock([{ match: () => true, respond: () => githubDispatchOkResponse() }]);
+    cleanupFetch = mock.restore;
+    const body = JSON.stringify(agentSessionCreated);
+    const req = await buildWebhookRequest({ body, linearEvent: "AgentSessionEvent" });
+    const resp = await SELF.fetch(req);
+    expect(resp.status).toBe(200);
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("created (enabled) → thought ack, fires linear-pickup, then response", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+
+    handleAgentSessionEvent(agentSessionCreated as unknown as AgentSessionEvent, fakeEnv, "trace123", ctx, true);
+    await settled();
+
+    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
+    expect(dispatch).toBeDefined();
+    const dispatched = JSON.parse(dispatch!.body!);
+    expect(dispatched.event_type).toBe("linear-pickup");
+    expect(dispatched.client_payload.issue_id).toBe("W-300");
+
+    const activities = mock.calls.filter(
+      (c) => c.url.includes("api.linear.app/graphql") && c.body!.includes("agentActivityCreate"),
+    );
+    expect(activities.length).toBe(2);
+    expect(JSON.parse(activities[0]!.body!).variables.input.content.type).toBe("thought");
+    expect(JSON.parse(activities[1]!.body!).variables.input.content.type).toBe("response");
+  });
+
+  it("prompted with stop signal → no-op (no dispatch, no activity)", () => {
+    const mock = installFetchMock([{ match: () => true, respond: () => githubDispatchOkResponse() }]);
+    cleanupFetch = mock.restore;
+    const { ctx } = capturingCtx();
+    handleAgentSessionEvent(
+      { action: "prompted", agentSession: { id: "s1" }, agentActivity: { signal: "stop" } },
+      fakeEnv,
+      "t",
+      ctx,
+      true,
+    );
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("created for an unmapped project → posts an error activity, no dispatch", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    handleAgentSessionEvent(
+      { action: "created", agentSession: { id: "s2", issue: { identifier: "W-301", project: { id: "00000000-0000-0000-0000-000000000000" } } } },
+      fakeEnv,
+      "t",
+      ctx,
+      true,
+    );
+    await settled();
+    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
+    const err = mock.calls.find((c) => c.url.includes("api.linear.app/graphql"));
+    expect(err).toBeDefined();
+    expect(JSON.parse(err!.body!).variables.input.content.type).toBe("error");
+  });
+
+  it("postAgentActivity posts agentActivityCreate with the content input", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    await postAgentActivity("sess-9", { type: "thought", body: "hi" }, fakeEnv, "tr");
+    expect(mock.calls.length).toBe(1);
+    const b = JSON.parse(mock.calls[0]!.body!);
+    expect(b.query).toContain("agentActivityCreate");
+    expect(b.variables.input.agentSessionId).toBe("sess-9");
+    expect(b.variables.input.content).toEqual({ type: "thought", body: "hi" });
   });
 });
 
