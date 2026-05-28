@@ -122,6 +122,11 @@ async function handleLinearWebhook(req: Request, env: Env, ctx: ExecutionContext
   const linearEvent = req.headers.get("Linear-Event") ?? "";
 
   if (!(await verifySignature(body, signature, env.LINEAR_WEBHOOK_SECRET))) {
+    // Log which event type failed HMAC (no secret logged). Distinguishes a
+    // wrong/rotated webhook secret from a second signing identity — e.g. Agent
+    // Session events signed with the OAuth app's signing secret rather than the
+    // workspace webhook's secret.
+    log("warn", "webhook_sig_fail", { linear_event: linearEvent || null, body_len: body.length });
     return new Response("invalid signature", { status: 401 });
   }
 
@@ -208,6 +213,7 @@ async function handleLinearWebhook(req: Request, env: Env, ctx: ExecutionContext
   log("info", "webhook_received", {
     trace,
     delivery_id: deliveryId,
+    linear_event: linearEvent || null,
     event_type: event.type,
     event_action: event.action,
   });
