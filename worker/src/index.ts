@@ -59,6 +59,10 @@ export default {
       return handleLinearWebhook(req, env);
     }
 
+    if (req.method === "GET" && url.pathname === "/verify") {
+      return handleVerify(url, env);
+    }
+
     return new Response("not found", { status: 404 });
   },
 };
@@ -557,6 +561,84 @@ async function fetchComment(commentId: string, env: Env): Promise<LinearComment 
   }
 
   return data.data?.comment ?? null;
+}
+
+// GET /verify?issue=W-NN&kind=pickup — assert a workflow's expected
+// post-conditions and return { pass, reason }. Used by the ssot-agents plugin's
+// Stop hook to let the agent self-correct a wrong outcome *before* the run ends.
+// This is an ADDITIVE early-correction layer: each workflow's own `if: always()`
+// verify step remains the authoritative backstop (it owns the Stuck/auto-replan
+// orchestration). /verify never flips state or dispatches — it only reports.
+//
+// Scope (W-233 vertical slice): kind=pickup, which is fully Linear-side. Other
+// kinds return pass=true (no-op) so the hook never blocks a workflow it can't
+// yet assert. GitHub-side kinds (pr-review/pr-fix) are a follow-up.
+async function handleVerify(url: URL, env: Env): Promise<Response> {
+  const issue = url.searchParams.get("issue") ?? "";
+  const kind = url.searchParams.get("kind") ?? "";
+  const json = (pass: boolean, reason: string) =>
+    new Response(JSON.stringify({ pass, reason }), {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    });
+
+  if (!issue) return json(true, "no issue supplied — skipping verify");
+  if (kind !== "pickup") return json(true, `no verifier for kind="${kind}" — skipping`);
+
+  const query = `
+    query($id: String!) {
+      issue(id: $id) {
+        state { name }
+        comments { nodes { body } }
+      }
+    }`;
+
+  let resp: Response;
+  try {
+    resp = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, variables: { id: issue } }),
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch {
+    // Fail-open: if we can't reach Linear, don't block the run. The workflow's
+    // backstop verify still runs and owns the authoritative outcome.
+    return json(true, "could not reach Linear — deferring to backstop verify");
+  }
+
+  if (!resp.ok) {
+    log("error", "verify_linear_failed", { issue, kind, status: resp.status });
+    return json(true, "Linear query failed — deferring to backstop verify");
+  }
+
+  const data = (await resp.json()) as {
+    data?: { issue?: { state?: { name?: string }; comments?: { nodes?: { body: string }[] } } };
+    errors?: unknown;
+  };
+  if (data.errors || !data.data?.issue) {
+    log("error", "verify_linear_errors", { issue, kind, errors: data.errors ?? "no_issue" });
+    return json(true, "Linear returned no issue — deferring to backstop verify");
+  }
+
+  const state = data.data.issue.state?.name ?? "";
+  const nodes = data.data.issue.comments?.nodes ?? [];
+  const marker = config.plan_marker;
+  const expectState = config.plan_review_state;
+  const hasPlan = nodes.some((n) => typeof n.body === "string" && n.body.startsWith(marker));
+  const stateOk = state === expectState;
+
+  if (stateOk && hasPlan) {
+    return json(true, "plan posted and issue in plan-review state");
+  }
+
+  const missing: string[] = [];
+  if (!hasPlan) missing.push(`no comment starting with the plan marker "${marker}" — post the plan comment`);
+  if (!stateOk) missing.push(`issue state is "${state}" but must be "${expectState}" — set it via mcp__linear__save_issue`);
+  log("info", "verify_fail", { issue, kind, state, has_plan: hasPlan });
+  return json(false, missing.join("; "));
 }
 
 export function lookupRepo(projectId: string): string | null {

@@ -133,6 +133,11 @@ jobs:
         id: claude
         env:
           MAX_THINKING_TOKENS: '10000'
+          # Opt in to the plugin's Stop-hook early verify (W-233). The hook calls
+          # the Worker /verify and blocks once so the agent self-corrects a missed
+          # plan/state before the run ends. The if:always() verify step below
+          # stays the authoritative backstop. ISSUE + CONFIG_URL come from job env.
+          SSOT_VERIFY_KIND: pickup
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Stable instructions live in the ssot-agents plugin skill (loaded via
