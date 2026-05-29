@@ -29,7 +29,12 @@ Steps:
 3b. Post a milestone comment as a threaded reply under the starting comment: `✏️ edits applied to N files _(trace: <TRACE>)_` where N is the number of files in your diff. Use mcp__linear__save_comment with `parentId` set to the starting comment ID from the per-request context below. If the starting comment ID is empty, skip this milestone.
 4. Create a branch named `<branch-prefix><issue-id-lowercased>-<short-kebab-slug-from-title>` (e.g. <branch-prefix>w-65-add-hello-script), substituting the branch prefix from the session-start pipeline config. Branch from main.
 5. Commit your changes. Commit message should focus on *why*. Include `Refs: <ISSUE>` as a trailer (substitute the issue ID from the per-request context below).
-6. Push the branch.
+6. Before pushing, check whether your change touches workflow files: run `git diff --name-only main...HEAD`.
+   - **If any changed path is under `.github/workflows/`**: do NOT push — the loop's git identity (the Claude GitHub App token) intentionally lacks the `workflow` scope, so GitHub will reject the push and this change needs a human to land it. Instead:
+     a. Post a Linear comment (threaded under the starting comment if its ID is non-empty, else top-level) explaining that the change touches workflow files and can't be auto-pushed, and include the patch so a human can apply it: run `git format-patch main..HEAD --stdout`, paste its output inside a fenced `diff` block (if it exceeds ~300 lines, include the first ~300 and note the truncation), and add: "Apply locally (`git am < patch.diff` or `git apply`) and push, or re-run implement once the workflow change has landed. _(trace: <TRACE>)_".
+     b. Set the Linear issue state back to "In Progress" (mcp__linear__save_issue).
+     c. Return the step 11 JSON with `pr_opened: false`, `blocked_on_workflow_files: true`, and a blocker entry naming the workflow file(s). Skip steps 6a–10 entirely and stop here.
+   - **Otherwise**: push the branch and continue.
 6a. Post a milestone comment as a threaded reply under the starting comment: `🌿 branch <branch-name> pushed _(trace: <TRACE>)_`. Use `parentId` as in step 3b. Skip if starting comment ID is empty.
 7. Open a ready (non-draft) PR with `gh pr create`:
    - Title = issue title
@@ -43,6 +48,7 @@ Steps:
       "pr_opened": boolean,   // true if you opened the PR in step 7
       "pr_url": string,       // the PR URL from step 7; "" if no PR was opened
       "state_set": boolean,   // true if you set the in-review state in step 9
+      "blocked_on_workflow_files": boolean, // true if you took the step 6 handoff (change touches .github/workflows/* — can't be pushed); false otherwise
       "summary": string,      // one-sentence summary of what you implemented (max ~200 chars)
       "blockers": string[]    // anything that blocked you or forced an assumption; [] if clean
     }
