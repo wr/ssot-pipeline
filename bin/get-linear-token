@@ -136,8 +136,20 @@ def main():
         print(f"No access_token in response: {payload}", file=sys.stderr)
         sys.exit(1)
 
+    # Linear migrated authorization_code tokens to ~24h expiry + refresh tokens
+    # (2026-04-01). Capture the refresh_token + expires_in so the access token
+    # can be auto-renewed (W-283) instead of hand-rotated every day.
+    refresh_token = payload.get("refresh_token")
+    expires_in = payload.get("expires_in")
+
     print("\n✅ Got LINEAR_APP_TOKEN")
     print(f"\n  {token}\n")
+    if expires_in:
+        print(f"  (access token expires in ~{int(expires_in) // 3600}h — use the refresh_token to renew)")
+    if refresh_token:
+        print(f"\n  LINEAR_REFRESH_TOKEN:\n  {refresh_token}\n")
+    else:
+        print("\n  ⚠️  No refresh_token in the response — auto-refresh (W-283) can't be seeded from this run.")
 
     # Verify the token works + check actor identity
     print("Verifying token…")
@@ -164,9 +176,9 @@ def main():
 
     print("\nNext steps:")
     print(f"  export LINEAR_APP_TOKEN='{token}'")
-    print("  Then store it as:")
-    print("    - a GitHub secret on each target repo (init-target-repo.sh does this)")
-    print("    - a Cloudflare Worker secret: cd worker && wrangler secret put LINEAR_APP_TOKEN")
+    print("  Store the access token everywhere at once:  bin/rotate-linear-token.sh -")
+    print("  For auto-refresh (W-283), also store as GitHub secrets on this repo:")
+    print("    - LINEAR_REFRESH_TOKEN (above), LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET")
 
 
 if __name__ == "__main__":
