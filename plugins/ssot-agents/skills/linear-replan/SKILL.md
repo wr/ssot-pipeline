@@ -29,7 +29,7 @@ Steps:
    Body MUST start with the exact plan marker from the session-start pipeline config.
    Body MUST end with a one-line decision-trailer reflecting step 6, followed by the trace trailer on the next line:
    - For `next_state: "in_progress"`: `_Proceeding to implementation per your reply._\n\n_(trace: <TRACE>)_`
-   - For `next_state: "plan_review"`: `_Awaiting your 👍 or "ship it" to proceed._\n\n_(trace: <TRACE>)_`
+   - For `next_state: "plan_review"`: `_👉 Reply in the **@claude agent session** for this issue to approve ("ship it") or request more changes — not to this comment._\n\n_(trace: <TRACE>)_`
    (substitute the trace ID from the per-request context below)
 8. Set issue state via mcp__linear__save_issue:
    - `next_state: "in_progress"` → set state to the in-progress state name from the session-start pipeline config (this transition is what the worker watches to fire linear-implement automatically).

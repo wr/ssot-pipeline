@@ -25,6 +25,9 @@ Steps:
    - `## Verification` — how to confirm the implementation is correct
 4. Post the plan as a top-level comment on the issue via mcp__linear__save_comment. The comment body MUST:
    - Start with the exact plan marker string from the session-start pipeline config (it's both the visible header and the marker the Worker greps for). Use it verbatim as the first line.
+   - Just above the trace trailer, include this reply signpost verbatim on its own line. It's important: replies to this comment are NOT read by the loop — only replies in the agent session are — so users must be told where to respond.
+
+     _👉 To approve or request changes, reply in the **@claude agent session** for this issue — not to this comment._
    - End with this exact trailer on its own line (substitute the trace ID from the per-request context below):
 
      _(trace: <TRACE>)_
