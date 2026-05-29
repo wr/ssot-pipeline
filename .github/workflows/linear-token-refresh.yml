@@ -23,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v6 # need worker/wrangler config for the Worker secret update
+
       - name: Mint secrets-write App token
         id: app
         uses: actions/create-github-app-token@v3
