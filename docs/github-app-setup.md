@@ -41,6 +41,8 @@ The Worker fires `repository_dispatch` events. Cheapest path: a fine-grained per
    # paste the token
    ```
 
+**Preferred (no rotation, ever): a GitHub App instead of the PAT (W-280).** A PAT expires/gets revoked and silently takes the loop down. Instead, point the Worker at a GitHub App and it mints a short-lived installation token per dispatch — nothing expires at rest. Set `DISPATCH_APP_ID` and `DISPATCH_APP_PRIVATE_KEY` (PKCS#8) as Worker secrets; when both are present the Worker uses the App and `GITHUB_DISPATCH_TOKEN` becomes an unused fallback. The App needs `Contents: write` + `Actions: write` and must be installed on every target repo (the `wr-claude-reviewer` App already qualifies — reusing it for dispatch is fine, since firing `repository_dispatch` doesn't make it a PR author). Convert a PKCS#1 key with `openssl pkcs8 -topk8 -nocrypt -in app.pem | wrangler secret put DISPATCH_APP_PRIVATE_KEY`.
+
 ## 3. Custom `claude` GitHub App (v1 — for native bot identity)
 
 > **Status: not implemented in v0.** v0 commits/PRs appear as `github-actions[bot]`. This section describes the v1 path for true `claude[bot]` identity.
