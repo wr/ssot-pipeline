@@ -303,6 +303,9 @@ jobs:
           MAX_THINKING_TOKENS: '10000'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Triggered by the wr-claude-reviewer bot's REQUEST_CHANGES review, so the
+          # actor is that bot; allow-list it or claude-code-action refuses. (W-274)
+          allowed_bots: "wr-claude-reviewer"
           additional_permissions: |
             workflows: write
           # Stable instructions live in the ssot-agents plugin skill (loaded via

@@ -167,6 +167,10 @@ jobs:
           SSOT_VERIFY_KIND: implement
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The Worker dispatches via the wr-claude-reviewer App token (W-280), so
+          # the triggering actor is that bot; claude-code-action blocks bot-initiated
+          # runs unless allow-listed. Only our App can fire this event_type. (W-274)
+          allowed_bots: "wr-claude-reviewer"
           additional_permissions: |
             workflows: write
           # Stable instructions live in the ssot-agents plugin skill (loaded via
