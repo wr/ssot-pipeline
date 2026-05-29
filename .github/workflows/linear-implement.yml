@@ -439,6 +439,10 @@ jobs:
           STUCK_COMMENT_ID: ${{ steps.stuck_comment.outputs.comment_id }}
           ISSUE_UUID: ${{ steps.verify.outputs.issue_uuid }}
           STUCK_UUID: ${{ steps.verify.outputs.stuck_uuid }}
+          # Thread the session id so a session-originated implement that auto-
+          # replans stays visible in the session (W-258). Empty for non-session
+          # runs → linear-replan's activity steps no-op.
+          AGENT_SESSION_ID: ${{ env.AGENT_SESSION_ID }}
         run: |
           set -euo pipefail
           if [ "$DO_REPLAN" = "1" ] && [ -n "$STUCK_COMMENT_ID" ]; then
@@ -454,8 +458,9 @@ jobs:
               --arg comment "$STUCK_COMMENT_ID" \
               --arg trace "$TRACE" \
               --arg shapes "$FAIL_SHAPES_TRIM" \
+              --arg session "${AGENT_SESSION_ID:-}" \
               --argjson attempt "$NEXT_ATTEMPT" \
-              '{event_type:"linear-replan",client_payload:{issue_id:$issue,comment_id:$comment,trace_id:$trace,prior_failure:$shapes,attempt:$attempt}}')
+              '{event_type:"linear-replan",client_payload:{issue_id:$issue,comment_id:$comment,trace_id:$trace,prior_failure:$shapes,attempt:$attempt,agent_session_id:$session}}')
             HTTP=$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' -X POST "$DISPATCH_URL" \
               -H "Authorization: Bearer ${GH_DISPATCH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
@@ -489,6 +494,18 @@ jobs:
           fi
 
           exit 1
+
+      - name: Agent session — PR opened action
+        # Finer-grained action milestone before the closing response (W-258), so
+        # the native timeline reads thought → action (opened PR) → response.
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.outcome == 'passed'
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: action
+          body: "Opened pull request for review"
+          result: ${{ steps.verify.outputs.matched_pr }}
 
       - name: Agent session — done response
         # Stream the PR-ready outcome back into the agent session (W-253).
