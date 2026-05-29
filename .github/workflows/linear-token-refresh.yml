@@ -1,0 +1,99 @@
+name: linear-token-refresh
+
+# Linear's authorization_code access tokens expire ~24h after mint (refresh-token
+# migration, 2026-04-01). This keeps LINEAR_APP_TOKEN alive forever with no manual
+# rotation: every 12h it redeems the rotating refresh token and redistributes the
+# fresh access token to all target repos + the Worker (W-283). The W-282 canary
+# catches it if a cycle ever fails.
+#
+# Secrets it reads (on this meta-repo): LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET,
+# LINEAR_REFRESH_TOKEN, CLOUDFLARE_API_TOKEN, CLAUDE_REVIEWER_APP_ID/KEY.
+# The App must have "Secrets: Read and write" so the run can update the secrets.
+
+on:
+  schedule:
+    - cron: "0 */12 * * *" # every 12h — half the 24h token life
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint secrets-write App token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CLAUDE_REVIEWER_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_REVIEWER_APP_KEY }}
+          owner: wr
+          repositories: |
+            ssot-pipeline
+            mojito
+            enshittifier
+
+      - name: Refresh Linear token + redistribute
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          CID: ${{ secrets.LINEAR_CLIENT_ID }}
+          CSEC: ${{ secrets.LINEAR_CLIENT_SECRET }}
+          RT: ${{ secrets.LINEAR_REFRESH_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REPOS: "wr/ssot-pipeline wr/mojito wr/enshittifier"
+          META_REPO: wr/ssot-pipeline
+        run: |
+          set -euo pipefail
+          if [ -z "${RT:-}" ] || [ -z "${CID:-}" ] || [ -z "${CSEC:-}" ]; then
+            echo "::error::Missing LINEAR_CLIENT_ID / LINEAR_CLIENT_SECRET / LINEAR_REFRESH_TOKEN secrets — seed them via bin/get-linear-token."
+            exit 1
+          fi
+
+          # Pre-flight: prove we can WRITE secrets BEFORE redeeming the single-use,
+          # rotating refresh token. If we can't persist the new refresh token, a
+          # redeem would spend the old one and break the chain — so fail first,
+          # without consuming anything. (Needs the App's Secrets: write perm.)
+          if ! printf 'preflight' | gh secret set LINEAR_REFRESH_PREFLIGHT --repo "$META_REPO" >/dev/null 2>&1; then
+            echo "::error::App token can't write secrets — grant the wr-claude-reviewer App 'Secrets: Read and write' (Repository permissions) and approve it on each install. Refresh token NOT consumed."
+            exit 1
+          fi
+          gh secret delete LINEAR_REFRESH_PREFLIGHT --repo "$META_REPO" >/dev/null 2>&1 || true
+
+          # Redeem the rotating refresh token.
+          RESP=$(curl -sS -X POST https://api.linear.app/oauth/token \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=refresh_token" \
+            --data-urlencode "refresh_token=${RT}" \
+            --data-urlencode "client_id=${CID}" \
+            --data-urlencode "client_secret=${CSEC}")
+          ACCESS=$(echo "$RESP" | jq -r '.access_token // ""')
+          NEWREFRESH=$(echo "$RESP" | jq -r '.refresh_token // ""')
+          if [ -z "$ACCESS" ] || [ -z "$NEWREFRESH" ]; then
+            echo "::error::Linear refresh failed: $(echo "$RESP" | jq -c '{error,error_description}' 2>/dev/null || echo redacted)"
+            exit 1
+          fi
+          echo "::add-mask::${ACCESS}"
+          echo "::add-mask::${NEWREFRESH}"
+
+          # Verify the fresh access token before distributing it.
+          VID=$(curl -sS -X POST https://api.linear.app/graphql \
+            -H "Authorization: Bearer ${ACCESS}" -H "Content-Type: application/json" \
+            -d '{"query":"{ viewer { id } }"}' | jq -r '.data.viewer.id // ""')
+          if [ -z "$VID" ]; then
+            echo "::error::Refreshed access token failed to authenticate — not distributing."
+            exit 1
+          fi
+
+          # Persist the rotated refresh token FIRST so the chain survives even if a
+          # later write fails (the old refresh token is now spent).
+          printf %s "$NEWREFRESH" | gh secret set LINEAR_REFRESH_TOKEN --repo "$META_REPO"
+
+          # Redistribute the fresh access token to every target repo + the Worker.
+          for repo in $REPOS; do
+            printf %s "$ACCESS" | gh secret set LINEAR_APP_TOKEN --repo "$repo"
+          done
+          printf %s "$ACCESS" | (cd worker && npx --yes wrangler secret put LINEAR_APP_TOKEN)
+
+          echo "✓ LINEAR_APP_TOKEN refreshed across ${REPOS} + Worker; refresh token rotated + persisted."
