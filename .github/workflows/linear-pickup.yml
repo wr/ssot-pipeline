@@ -209,7 +209,7 @@ jobs:
             echo "no plan comment found — skipping in-session elicitation (trace=${TRACE})"
             exit 0
           fi
-          BODY=$(printf '%s\n\n---\nReply **approve** to build this, or reply with changes.' "$PLAN")
+          BODY=$(printf '%s\n\n---\n**Reply here, in this agent session,** to respond — say **approve** to build it, or describe any changes and I will revise the plan.' "$PLAN")
           curl -sS -X POST "$GQL_URL" -H "$AUTH" -H "$CT" \
             -d "$(jq -nc --arg sid "$AGENT_SESSION_ID" --arg b "$BODY" '{query:"mutation($input: AgentActivityCreateInput!){agentActivityCreate(input:$input){success}}",variables:{input:{agentSessionId:$sid,content:{type:"elicitation",body:$b}}}}')" > /dev/null
           echo "trace=${TRACE} posted plan elicitation to agent session ${AGENT_SESSION_ID}"
