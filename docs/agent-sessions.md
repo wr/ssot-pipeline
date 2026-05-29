@@ -27,9 +27,14 @@ To roll back: set the flag to `false` and redeploy. The handler returns immediat
 
 ## Deferred
 
-The native flow above (streamed activities + plan-as-elicitation + in-session approval + `prompted`→replan) shipped in W-253 and W-254. The plan still also lands as a Linear comment so `linear-implement` can read it. Remaining follow-ups:
+The native flow above (streamed activities + plan-as-elicitation + in-session approval + `prompted`→replan) shipped in W-253 and W-254. The plan still also lands as a Linear comment so `linear-implement` can read it.
 
-- **Richer per-step streaming.** Workflows emit a start `thought` + an end `response`/`error` today; finer-grained `action` activities per step (and driving Linear's `active`/`awaitingInput`/`complete` lifecycle more precisely) would make the native UI more informative.
+**Richer per-step streaming** (W-258): `linear-implement` now emits an `action` activity ("Opened pull request", with the PR URL as `result`) between its start `thought` and closing `response`, and `linear-replan` — previously silent in-session — now streams a start `thought` and an end `response`/`error`. The `post-agent-activity` action supports the `action` content shape (`{action, result?}`) so any workflow step can post a milestone. `agent_session_id` is threaded through `linear-implement`'s auto-replan dispatch so a session-originated implement that self-heals stays visible.
+
+Still deferred:
+
+- **Explicit lifecycle signals.** Session lifecycle (`active`/`awaitingInput`/`complete`) is still driven *implicitly* by activity type (thought → working, elicitation → awaiting input, response → done, error → failed). Setting it explicitly on `agentActivityCreate` isn't done because the API shape for an explicit lifecycle/signal field on *outbound* activities isn't confirmed; the implicit mapping works today.
+- **`pr-review` / `pr-fix` streaming.** These run off GitHub `pull_request` / `pull_request_review` webhooks, not `repository_dispatch`, so no `agent_session_id` reaches them. Wiring them in would require persisting a session↔PR mapping, which conflicts with the **stateless-Worker** principle (state lives in Linear/GitHub, not the Worker). Left out deliberately rather than introducing Worker state.
 
 ## API reference (as of 2026-05)
 

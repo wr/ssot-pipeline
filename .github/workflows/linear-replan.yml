@@ -32,9 +32,14 @@ jobs:
       TRACE: ${{ github.event.client_payload.trace_id }}
       ISSUE: ${{ github.event.client_payload.issue_id }}
       COMMENT_ID: ${{ github.event.client_payload.comment_id }}
+      # Present only when the replan was triggered from a Linear agent session
+      # (a mid-session reply, or an auto-replan from a session-originated
+      # implement run). Empty otherwise → the agent-activity steps below no-op
+      # and behavior is unchanged. See W-258.
+      AGENT_SESSION_ID: ${{ github.event.client_payload.agent_session_id }}
     steps:
       - name: Trace
-        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE} comment=${COMMENT_ID}"
+        run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE} comment=${COMMENT_ID} agent_session=${AGENT_SESSION_ID:-<none>}"
 
       - uses: actions/checkout@v6
 
@@ -103,6 +108,15 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null
           echo "trace=${TRACE} posted starting comment for $ISSUE"
+
+      - name: Agent session — replanning thought
+        # No-op unless this run came from an agent session (W-258).
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: thought
+          body: "Re-planning ${{ env.ISSUE }} with your guidance — I'll post an updated plan for review."
 
       - name: Write MCP config
         uses: wr/ssot-pipeline/.github/actions/write-mcp-config@main
@@ -242,3 +256,22 @@ jobs:
       - name: Exit non-zero if verify failed
         if: always() && steps.verify.outputs.needs_stuck == 'true'
         run: exit 1
+
+      - name: Agent session — updated-plan response
+        # Stream the replan outcome back into the agent session (W-258).
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.needs_stuck == 'false'
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: response
+          body: "Updated the plan for ${{ env.ISSUE }} — please review it and reply approve to build, or reply with more changes."
+
+      - name: Agent session — replan failure note
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.needs_stuck == 'true'
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: error
+          body: "I couldn't post an updated plan for ${{ env.ISSUE }} — see the issue for details."

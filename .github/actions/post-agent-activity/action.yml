@@ -19,11 +19,15 @@ inputs:
     required: false
     default: ''
   type:
-    description: 'Activity type: thought | response | elicitation | error (body-shaped content).'
+    description: 'Activity type: thought | response | elicitation | error (body-shaped content), or action ({action, result?}-shaped — pass the action label in `body` and an optional outcome in `result`).'
     required: true
   body:
-    description: 'Activity body text.'
+    description: 'For body-shaped types, the activity text. For type=action, the action label (maps to Linear content.action).'
     required: true
+  result:
+    description: 'Optional outcome string for type=action (content.result), e.g. a PR URL. Ignored for body-shaped types.'
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -35,15 +39,23 @@ runs:
         SESSION_ID: ${{ inputs.session_id }}
         ACT_TYPE: ${{ inputs.type }}
         ACT_BODY: ${{ inputs.body }}
+        ACT_RESULT: ${{ inputs.result }}
       run: |
         set -euo pipefail
         if [ -z "${SESSION_ID:-}" ]; then
           echo "post-agent-activity: no session id — skipping ($ACT_TYPE)"
           exit 0
         fi
+        # action activities use {action, result?} content; the others use {body}.
+        if [ "$ACT_TYPE" = "action" ]; then
+          CONTENT=$(jq -nc --arg a "$ACT_BODY" --arg r "${ACT_RESULT:-}" \
+            'if $r == "" then {type:"action",action:$a} else {type:"action",action:$a,result:$r} end')
+        else
+          CONTENT=$(jq -nc --arg t "$ACT_TYPE" --arg b "$ACT_BODY" '{type:$t,body:$b}')
+        fi
         GQL_URL=https://api.linear.app/graphql
-        QUERY=$(jq -nc --arg sid "$SESSION_ID" --arg t "$ACT_TYPE" --arg b "$ACT_BODY" \
-          '{query:"mutation($input: AgentActivityCreateInput!){agentActivityCreate(input:$input){success}}",variables:{input:{agentSessionId:$sid,content:{type:$t,body:$b}}}}')
+        QUERY=$(jq -nc --arg sid "$SESSION_ID" --argjson content "$CONTENT" \
+          '{query:"mutation($input: AgentActivityCreateInput!){agentActivityCreate(input:$input){success}}",variables:{input:{agentSessionId:$sid,content:$content}}}')
         RESP=$(curl -sS -X POST "$GQL_URL" \
           -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
           -H "Content-Type: application/json" \
