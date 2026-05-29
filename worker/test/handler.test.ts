@@ -347,6 +347,83 @@ describe("AgentSessionEvent (W-243)", () => {
     expect(JSON.parse(activities[1]!.body!).variables.input.content.type).toBe("response");
   });
 
+  // W-280: dispatch auth via a GitHub App installation token instead of a PAT.
+  // Throwaway 2048-bit RSA test key (PKCS#8) — never used outside these tests.
+  const TEST_PKCS8_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDl114jT2cx3Y6k
+d1rBwoE5ByNjf+WDSpMUNXOOgz+mV2v4LyQQKBi20xLnGbVCxcP/yfZk6aA8FM1o
+lITOCOho7yonr/VLA4n4FJBI8uDjdQC8Wzhn4qaU/Yu1X5giugT75MRuSFDS1Z5F
+XDn5XhuH7xupMTyyUpIEdTx6+T17NVPe/enXvQ8LrEldD/1cTXnDmuHi10soLX6m
+22SEyY97JpbZFbYaGFiJC+1u1E3g20wyyborSB/QU4KQGZ/4LWjvXRhWJltJMYo2
+kXK/DeDV7+5pr33Yqy6MaZv7A9NERKXLheXZDqRFE7JFn1Rzf4eT9d8GyQLtJQZD
+vpd8NsNZAgMBAAECggEAAQW1tft+7oJZRZMAVNdMIthMyH8DotNclxzrwCkGSfOe
+l9KB2w6KmZmTvnJnU340snkP/v/pBgtjpIDwnEf+3KSfr+CA+03vOarBv4lRBcH5
++FyBgjjIW+ZKzko4D4N7TTGFzCXHMkDf/Nf9rAXGopKmMVj2N6bVXm61D6j3JIqk
+hbshPLSWqFc1Vu1Q7eeWMiKOPrOs5MjdqxRX7fAkokzbkida/AO16luQPhMQ8q7X
+cuEfZ8UBdCKGgR/XMoxSfaKqJy45maXcMusYU5L+zLihD8qbrbITbuhOzWL3S8Xf
+La+SwAbsK1qk4IfSVh/RkM7qDPia1Imfk7T1/Mg89wKBgQD5dRZ2n3kyXWWkCpLJ
++z9czUcW99cUv9bD5FNIB0GSgc7X79fa163YZ5WRII3mtUwjjoVuIBJ7GunQlURr
+SyfQ1FJrxbwpHtagdmWtsU22P4kS9PHe8th4gqWydc7rx0SgBX4S6kzIyHhWfGXw
+U75cShzjj6EF1DSB22G+DPPzvwKBgQDr3pK68GeM00ddoPPi1BZeMdM9TI2Fe257
+k4lruL9ApXr80LdeOlc9w/NrHUNPPU7u7Kgp41QvV+a3/uvBui2E0nPOgujaBDAD
+2kJjbFC+YHQ4nd4kHq8HuhM04E42UWGMFwtkoOIty89ozlGorCILj67zqYRgNfYg
+AELFdhau5wKBgQC/l9VT8HHmY+Nv1YseRLFKtoM2Oc5gqmLp+5CXTrNnMfnK0fRo
+qaRlBFHUsDssiexbltgWV9253Vbdk/eDrKp88sYG7kzxDDVt8uFvQTFdm3jNLYIj
+aUMnc7iN03vEjTzA5tcI8hldUNNUIaEtrzQSr/12LddPocdeQT/V9x7bAwKBgQDL
+sp4ZX4Ct99DMJTI6lFr04ibB65jUzDIv+sxVAWn51G+QYlfZwpyRNObFfLIifpnq
+cOsRsceEU29nO3ozBixFZtKoaBncHn2w9g8befGJWBdGxd+QZgdWrvXjVkt1UXbi
+2wv1zZNHZZorsvKGrpGAVogK2jz+Mdvq6w6/JSqVxQKBgQDw4Cltyb+qGszSjD5D
+94WppTOdB0t3DISHFo7Mn2c/OUtHjArJ4KiKp6e8l2LRvsnrGTpfHjJZrvltVRY3
+2LAUxx77NbOprWDYsnpkbauPpfZDIO2nDqXUR12D4+i7sO8IF4aSwX1kAQ/xEHTM
+3xsCpz5AlOsDEoRQ6HIDJMeiKw==
+-----END PRIVATE KEY-----`;
+
+  it("created with App creds → mints an installation token and dispatches with it (W-280)", async () => {
+    const appEnv = {
+      LINEAR_APP_TOKEN: "linear-token",
+      DISPATCH_APP_ID: "3849589",
+      DISPATCH_APP_PRIVATE_KEY: TEST_PKCS8_KEY,
+    } as unknown as Env;
+    const mock = installFetchMock([
+      // Order matters: /access_tokens before /installation ("installations" contains "installation").
+      { match: (u) => u.includes("/access_tokens"), respond: () => new Response(JSON.stringify({ token: "minted-app-token" }), { status: 201, headers: { "Content-Type": "application/json" } }) },
+      { match: (u) => u.includes("/dispatches"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("/installation"), respond: () => new Response(JSON.stringify({ id: 4242 }), { status: 200, headers: { "Content-Type": "application/json" } }) },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+
+    handleAgentSessionEvent(agentSessionCreated as unknown as AgentSessionEvent, appEnv, "trace280", ctx, true);
+    await settled();
+
+    // It looked up the installation and minted a token (no static PAT in env).
+    expect(mock.calls.some((c) => c.url.includes("/installation"))).toBe(true);
+    expect(mock.calls.some((c) => c.url.includes("/access_tokens"))).toBe(true);
+    // The dispatch used the freshly-minted App token.
+    const dispatch = mock.calls.find((c) => c.url.includes("/repos/") && c.url.includes("/dispatches"));
+    expect(dispatch).toBeDefined();
+    expect(dispatch!.headers.Authorization).toBe("Bearer minted-app-token");
+    expect(JSON.parse(dispatch!.body!).event_type).toBe("linear-pickup");
+  });
+
+  it("created without App creds → falls back to the GITHUB_DISPATCH_TOKEN PAT (W-280)", async () => {
+    const mock = installFetchMock([
+      { match: (u) => u.includes("/dispatches"), respond: () => githubDispatchOkResponse() },
+      { match: (u) => u.includes("api.linear.app/graphql"), respond: () => agentActivityOk() },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+
+    handleAgentSessionEvent(agentSessionCreated as unknown as AgentSessionEvent, fakeEnv, "traceFallback", ctx, true);
+    await settled();
+
+    // No App creds → no installation/token minting; PAT used directly.
+    expect(mock.calls.some((c) => c.url.includes("/installation"))).toBe(false);
+    const dispatch = mock.calls.find((c) => c.url.includes("/dispatches"));
+    expect(dispatch!.headers.Authorization).toBe("Bearer gh-token");
+  });
+
   it("prompted with stop signal → no-op (no dispatch, no activity)", () => {
     const mock = installFetchMock([{ match: () => true, respond: () => githubDispatchOkResponse() }]);
     cleanupFetch = mock.restore;

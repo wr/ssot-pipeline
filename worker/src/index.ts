@@ -7,7 +7,13 @@ export { DedupDO };
 export interface Env {
   LINEAR_WEBHOOK_SECRET: string;
   LINEAR_APP_TOKEN: string;
-  GITHUB_DISPATCH_TOKEN: string;
+  // Dispatch auth. Prefer a GitHub App (DISPATCH_APP_ID + PKCS#8 private key):
+  // the Worker mints a short-lived installation token per dispatch, so nothing
+  // expires and no rotation is ever needed (W-280). GITHUB_DISPATCH_TOKEN (a
+  // fine-grained PAT) is the legacy fallback used only when App creds are unset.
+  DISPATCH_APP_ID?: string;
+  DISPATCH_APP_PRIVATE_KEY?: string;
+  GITHUB_DISPATCH_TOKEN?: string;
   DEDUP: DurableObjectNamespace;
 }
 
@@ -678,6 +684,85 @@ export function matchesApprovalPhrase(body: string, phrase: string): boolean {
   return pattern.test(body);
 }
 
+// --- GitHub App dispatch auth (W-280) -------------------------------------
+// Mint a short-lived installation token from a GitHub App rather than rely on
+// a static PAT, so dispatch credentials never expire and never need rotating.
+// Falls back to the legacy GITHUB_DISPATCH_TOKEN PAT when App creds are unset.
+
+function pemToPkcs8Bytes(pem: string): ArrayBuffer {
+  const b64 = pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function base64url(input: string | Uint8Array): string {
+  const bin = typeof input === "string" ? input : String.fromCharCode(...input);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function signAppJwt(appId: string, pkcs8Pem: string): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  // iat backdated 60s for clock skew; exp well under GitHub's 10-minute max.
+  const claims = base64url(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }));
+  const data = `${header}.${claims}`;
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToPkcs8Bytes(pkcs8Pem),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(data)));
+  return `${data}.${base64url(sig)}`;
+}
+
+const ghAppHeaders = (auth: string) => ({
+  Authorization: `Bearer ${auth}`,
+  Accept: "application/vnd.github+json",
+  "X-GitHub-Api-Version": "2022-11-28",
+  "User-Agent": "ssot-pipeline-worker",
+});
+
+// Mint an installation token scoped to just this repo with the perms dispatch
+// needs. Throws on any non-OK response so the caller can fall back to the PAT.
+async function mintInstallationToken(owner: string, name: string, jwt: string): Promise<string> {
+  const instResp = await fetch(`https://api.github.com/repos/${owner}/${name}/installation`, {
+    headers: ghAppHeaders(jwt),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!instResp.ok) throw new Error(`installation lookup for ${owner}/${name} failed: ${instResp.status}`);
+  const inst = (await instResp.json()) as { id: number };
+  const tokResp = await fetch(`https://api.github.com/app/installations/${inst.id}/access_tokens`, {
+    method: "POST",
+    headers: ghAppHeaders(jwt),
+    body: JSON.stringify({ repositories: [name], permissions: { contents: "write", actions: "write" } }),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!tokResp.ok) throw new Error(`installation token for ${owner}/${name} failed: ${tokResp.status}`);
+  return ((await tokResp.json()) as { token: string }).token;
+}
+
+// A freshly-minted App installation token when DISPATCH_APP_* are set
+// (nothing to expire at rest), else the legacy GITHUB_DISPATCH_TOKEN PAT.
+async function resolveDispatchToken(owner: string, name: string, env: Env, trace: string): Promise<string> {
+  if (env.DISPATCH_APP_ID && env.DISPATCH_APP_PRIVATE_KEY) {
+    try {
+      const jwt = await signAppJwt(env.DISPATCH_APP_ID, env.DISPATCH_APP_PRIVATE_KEY);
+      return await mintInstallationToken(owner, name, jwt);
+    } catch (e) {
+      log("warn", "dispatch_app_token_failed", { trace, repo: `${owner}/${name}`, error: String(e) });
+      // fall through to the PAT
+    }
+  }
+  if (!env.GITHUB_DISPATCH_TOKEN) {
+    throw new Error("no dispatch credentials configured (set DISPATCH_APP_ID/DISPATCH_APP_PRIVATE_KEY or GITHUB_DISPATCH_TOKEN)");
+  }
+  return env.GITHUB_DISPATCH_TOKEN;
+}
+
 async function fireDispatch(
   repo: string,
   eventType: string,
@@ -689,10 +774,11 @@ async function fireDispatch(
   if (!owner || !name) throw new Error(`Invalid repo "${repo}"`);
 
   const url = `https://api.github.com/repos/${owner}/${name}/dispatches`;
+  const dispatchToken = await resolveDispatchToken(owner, name, env, trace);
   const reqInit: RequestInit = {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+      Authorization: `Bearer ${dispatchToken}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "ssot-pipeline-worker",
