@@ -140,6 +140,10 @@ jobs:
           MAX_THINKING_TOKENS: '10000'
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Worker dispatches via the wr-claude-reviewer App token (W-280) → the
+          # triggering actor is that bot; allow-list it or claude-code-action
+          # refuses bot-initiated runs. Only our App can fire this event_type. (W-274)
+          allowed_bots: "wr-claude-reviewer"
           # Stable instructions live in the ssot-agents plugin skill (loaded via
           # --plugin-dir below); this prompt invokes the skill and passes only
           # the per-request context. The skill body substitutes it for $ARGUMENTS.
