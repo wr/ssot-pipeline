@@ -645,6 +645,20 @@ async function handleVerify(url: URL, env: Env): Promise<Response> {
     // This is the Linear-observable core only — the workflow's backstop verify
     // additionally checks the PR head-ref pattern and the Closes-trailer, which
     // need GitHub API access the Worker doesn't have.
+    //
+    // Exception (W-311): if the agent legitimately parked the issue awaiting user
+    // input — ambiguous requirement, false plan premise, nothing to do — it posts
+    // a question comment starting with needs_input_marker and leaves the issue in
+    // In Progress. That's not a failed implement, so don't nag the agent to open a
+    // PR. Pass early. The workflow's backstop verify reads the agent's structured
+    // output and classifies this run as `awaiting_input` (no Stuck, no replan).
+    const parkedForInput =
+      typeof config.needs_input_marker === "string" &&
+      (issueData.comments?.nodes ?? []).some(
+        (n) => typeof n.body === "string" && n.body.startsWith(config.needs_input_marker),
+      );
+    if (parkedForInput) return json(true, "awaiting user input — parked, not a failed implement");
+
     const expectState = config.in_review_state;
     const hasPr = (issueData.attachments?.nodes ?? []).some(
       (a) => typeof a.url === "string" && a.url.includes("github.com") && a.url.includes("/pull/"),

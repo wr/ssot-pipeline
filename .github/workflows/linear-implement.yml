@@ -191,7 +191,7 @@ jobs:
             --model claude-opus-4-7
             --allowedTools "mcp__linear__get_issue" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "mcp__linear__create_attachment" "mcp__github__get_pull_request" "mcp__github__pull_request_read" "mcp__github__list_pull_requests" "Bash" "Read" "Write" "Edit" "Grep" "Glob"
             --disallowedTools "Bash(rm *)" "Bash(rm:*)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push --force*)" "Bash(git push -f*)" "Bash(git push --force-with-lease*)" "Bash(git push --mirror*)" "Bash(git push --delete*)" "Bash(git push *:*)" "Bash(git push * --delete*)" "Bash(git remote add *)" "Bash(git remote set-url *)" "Bash(git reset --hard origin/main*)" "Bash(git update-ref -d *)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh repo transfer*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh api -X DELETE*)" "Bash(gh api --method DELETE*)" "Bash(gh auth*)" "Bash(gh ssh-key*)" "Bash(gh gpg-key*)" "WebFetch" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
-            --json-schema '{"type":"object","additionalProperties":false,"required":["pr_opened","pr_url","state_set","summary","blockers"],"properties":{"pr_opened":{"type":"boolean"},"pr_url":{"type":"string"},"state_set":{"type":"boolean"},"blocked_on_workflow_files":{"type":"boolean"},"summary":{"type":"string","maxLength":500},"blockers":{"type":"array","items":{"type":"string"},"maxItems":20}}}'
+            --json-schema '{"type":"object","additionalProperties":false,"required":["pr_opened","pr_url","state_set","summary","blockers"],"properties":{"pr_opened":{"type":"boolean"},"pr_url":{"type":"string"},"state_set":{"type":"boolean"},"blocked_on_workflow_files":{"type":"boolean"},"needs_user_input":{"type":"boolean"},"summary":{"type":"string","maxLength":500},"blockers":{"type":"array","items":{"type":"string"},"maxItems":20}}}'
 
       - name: Verify outcome
         id: verify
@@ -256,6 +256,7 @@ jobs:
           SO_PR_OPENED=""
           SO_BLOCKERS_INLINE=""
           SO_WF_BLOCKED=""
+          SO_NEEDS_INPUT=""
           if [ -n "${STRUCTURED_OUTPUT:-}" ] && echo "$STRUCTURED_OUTPUT" | jq -e . >/dev/null 2>&1; then
             SO_PR_OPENED=$(echo "$STRUCTURED_OUTPUT" | jq -r '.pr_opened // empty')
             SO_STATE_SET=$(echo "$STRUCTURED_OUTPUT" | jq -r '.state_set // empty')
@@ -263,6 +264,7 @@ jobs:
             SO_SUMMARY=$(echo "$STRUCTURED_OUTPUT" | jq -r '.summary // empty')
             SO_BLOCKERS_INLINE=$(echo "$STRUCTURED_OUTPUT" | jq -r '(.blockers // []) | join("; ")')
             SO_WF_BLOCKED=$(echo "$STRUCTURED_OUTPUT" | jq -r '.blocked_on_workflow_files // empty')
+            SO_NEEDS_INPUT=$(echo "$STRUCTURED_OUTPUT" | jq -r '.needs_user_input // empty')
             echo "structured_output: pr_opened=$SO_PR_OPENED state_set=$SO_STATE_SET pr_url=$SO_PR_URL"
             echo "summary: $SO_SUMMARY"
             [ -n "$SO_BLOCKERS_INLINE" ] && echo "self-reported blockers: $SO_BLOCKERS_INLINE"
@@ -355,6 +357,20 @@ jobs:
           if [ "$SO_WF_BLOCKED" = "true" ] && [ "$PR_COUNT" -eq 0 ]; then
             echo "::notice::trace=${TRACE} ${ISSUE} modifies .github/workflows/* — handed off to a human (patch posted by the skill). No PR expected; not flagging Stuck."
             echo "outcome=workflow_handoff" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Recognized park (W-311): the agent legitimately needs user input — an
+          # ambiguous requirement, a false plan premise, or nothing to do — and
+          # posted a question instead of a PR, leaving the issue In Progress. That's
+          # a clarifying question, not a failure: don't flag Stuck or auto-replan.
+          # The agent's own question comment (needs-input marker) is the breadcrumb;
+          # re-engagement happens when the human answers.
+          if [ "$SO_NEEDS_INPUT" = "true" ] && [ "$PR_COUNT" -eq 0 ]; then
+            echo "::notice::trace=${TRACE} ${ISSUE} is awaiting user input (agent posted a question, no PR). Not flagging Stuck."
+            echo "outcome=awaiting_input" >> "$GITHUB_OUTPUT"
+            [ -n "$SO_BLOCKERS_INLINE" ] && echo "question/blockers: $SO_BLOCKERS_INLINE"
+            echo "awaiting_input_note=${SO_BLOCKERS_INLINE}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -542,6 +558,17 @@ jobs:
           session_id: ${{ env.AGENT_SESSION_ID }}
           type: response
           body: "This change touches workflow files, which I can't push (the app token withholds the workflow scope by design). I've posted the patch on ${{ env.ISSUE }} for you to apply."
+
+      - name: Agent session — awaiting input response
+        # The agent legitimately needs user input (W-311) — surface its question as
+        # a response, not an error. Not a failure, so no Stuck/replan happened.
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.outcome == 'awaiting_input'
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: response
+          body: "I need a bit more input on ${{ env.ISSUE }} before I can implement it — ${{ steps.verify.outputs.awaiting_input_note != '' && steps.verify.outputs.awaiting_input_note || 'see the question I posted on the issue' }}."
 
       - name: Agent session — failure note
         if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.outcome == 'failed'

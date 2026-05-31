@@ -49,12 +49,16 @@ Steps:
       "pr_url": string,       // the PR URL from step 7; "" if no PR was opened
       "state_set": boolean,   // true if you set the in-review state in step 9
       "blocked_on_workflow_files": boolean, // true if you took the step 6 handoff (change touches .github/workflows/* — can't be pushed); false otherwise
+      "needs_user_input": boolean, // true if you took the "needs user input" path below (parked the issue with a question, no PR); false otherwise
       "summary": string,      // one-sentence summary of what you implemented (max ~200 chars)
       "blockers": string[]    // anything that blocked you or forced an assumption; [] if clean
     }
-    The action validates this against a JSON schema; the workflow's verify step consumes it via structured_output as an additive cross-check (the world-state assertions remain authoritative). Be honest — if you hit the blocker path below, return `pr_opened: false` with the reason(s) in `blockers` rather than reporting success.
+    The action validates this against a JSON schema; the workflow's verify step consumes it via structured_output as an additive cross-check (the world-state assertions remain authoritative). Be honest — if you hit a blocker path below, return `pr_opened: false` with the reason(s) in `blockers` rather than reporting success.
 
-If anything blocks you (plan unclear, tests fail, can't push): post a Linear comment describing the blocker (include the trace), set state back to "In Progress", and stop. Don't open a broken PR. Still return the step 11 JSON with `pr_opened: false` and the blocker(s) listed.
+If something blocks you, pick the right path:
+
+- **Needs user input** (the requirement is ambiguous, the plan's premise turned out to be false, or there's genuinely nothing to do — anything where you need the human to answer before you can proceed): this is NOT a failure. Post a Linear comment whose **first line is the needs-input marker from the session-start pipeline config** (verbatim), followed by your specific question — what you found, why you can't proceed, and exactly what you need from the user (e.g. an example, a decision, a missing reference). Thread it under the starting comment if its ID is non-empty, else post top-level. Include the trace. Set state back to "In Progress" and stop. Return the step 11 JSON with `pr_opened: false`, `needs_user_input: true`, and the question summarized in `blockers`. If the Stop-hook nags you afterward to open a PR or set the in-review state, do NOT — you have correctly parked this issue for the user; just stop. Don't invent work or open a speculative PR to satisfy the gate.
+- **Hard blocker** (tests fail, a real defect you can't resolve, can't push for a non-workflow reason): post a Linear comment describing the blocker (include the trace), set state back to "In Progress", and stop. Don't open a broken PR. Return the step 11 JSON with `pr_opened: false`, `needs_user_input: false`, and the blocker(s) listed.
 
 --- per-request context (variable; provided at invocation) ---
 $ARGUMENTS

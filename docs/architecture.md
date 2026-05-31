@@ -41,6 +41,10 @@ If the assertion fails: the step posts a diagnostic comment with the trace ID, f
 
 The `Stuck` state must exist in the Linear team workflow (type: Started). The verification step warns but doesn't crash if it's missing.
 
+**Recognized non-failure outcomes (not Stuck).** Some `linear-implement` runs legitimately end without a PR, and the agent signals this in its structured output so the verify step routes around Stuck/auto-replan:
+- `workflow_handoff` (`blocked_on_workflow_files: true`) — the change touches `.github/workflows/*`, which the loop's git identity can't push; the skill posts the patch for a human to land (W-276/W-218).
+- `awaiting_input` (`needs_user_input: true`) — the agent needs the human to answer before it can proceed (ambiguous requirement, false plan premise, nothing to do). It posts a question comment starting with the `needs_input_marker` and leaves the issue `In Progress`. The Worker `/verify` early-Stop-hook also recognizes that marker so it doesn't nag the agent to open a PR. Re-engagement happens when the human answers (W-311).
+
 ## The review/fix sub-loop
 
 `pr-review` and `pr-fix` form a self-correcting loop on the PR side, separate from the Linear-dispatched main loop:

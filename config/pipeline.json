@@ -2,6 +2,7 @@
   "$schema": "./pipeline.schema.json",
   "version": 1,
   "plan_marker": "### 📋 Plan",
+  "needs_input_marker": "### ⏳ Awaiting input",
   "agent_sessions_enabled": true,
   "linear_mcp_url": "https://mcp.linear.app/mcp",
   "linear_mcp_transport": "http",

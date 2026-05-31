@@ -33,6 +33,7 @@ const SECRET = "test-secret";
 const SSOT_REPO = "wr/ssot-pipeline";
 const SSOT_PROJECT_ID = "f9eb7447-31fb-4e02-b46b-7d147f2d0f55";
 const PLAN_MARKER_LINE = "### 📋 Plan";
+const NEEDS_INPUT_MARKER_LINE = "### ⏳ Awaiting input";
 
 // Always restore fetch between tests so a broken stub from one test doesn't
 // leak into another.
@@ -583,6 +584,7 @@ describe("GET /config", () => {
     expect(resp.headers.get("Content-Type")).toBe("application/json");
     const cfg = (await resp.json()) as Record<string, unknown>;
     expect(cfg.plan_marker).toBe(PLAN_MARKER_LINE);
+    expect(cfg.needs_input_marker).toBe(NEEDS_INPUT_MARKER_LINE);
     expect((cfg.project_to_repo as Record<string, string>)[SSOT_PROJECT_ID]).toBe(SSOT_REPO);
   });
 });
@@ -677,13 +679,13 @@ describe("GET /verify — pickup post-conditions", () => {
 });
 
 describe("GET /verify — implement post-conditions", () => {
-  const linearIssueAttach = (stateName: string, urls: string[]): Response =>
+  const linearIssueAttach = (stateName: string, urls: string[], commentBodies: string[] = []): Response =>
     new Response(
       JSON.stringify({
         data: {
           issue: {
             state: { name: stateName },
-            comments: { nodes: [] },
+            comments: { nodes: commentBodies.map((b) => ({ body: b })) },
             attachments: { nodes: urls.map((u) => ({ url: u })) },
           },
         },
@@ -726,5 +728,24 @@ describe("GET /verify — implement post-conditions", () => {
     expect(v.pass).toBe(false);
     expect(v.reason).toContain("In Review");
     expect(v.reason).not.toContain("PR attached");
+  });
+
+  // W-311: the agent legitimately parked the issue awaiting user input — it posted
+  // a needs-input-marker comment and left the issue In Progress with no PR. That's a
+  // clarifying question, not a failed implement, so /verify must pass (don't nag the
+  // agent to open a PR). The workflow backstop classifies the run as awaiting_input.
+  it("passes (parked) when a needs-input marker comment is present, despite no PR / wrong state", async () => {
+    const mock = installFetchMock([
+      {
+        match: (u) => u.includes("linear.app"),
+        respond: () => linearIssueAttach("In Progress", [], [`${NEEDS_INPUT_MARKER_LINE}\nwhich emoji is missing?`]),
+      },
+    ]);
+    cleanupFetch = mock.restore;
+
+    const resp = await SELF.fetch("https://worker.test/verify?issue=W-1&kind=implement");
+    const v = (await resp.json()) as { pass: boolean; reason: string };
+    expect(v.pass).toBe(true);
+    expect(v.reason).toContain("awaiting user input");
   });
 });
