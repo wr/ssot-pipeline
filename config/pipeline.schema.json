@@ -8,6 +8,7 @@
   "required": [
     "version",
     "plan_marker",
+    "needs_input_marker",
     "linear_mcp_url",
     "linear_mcp_transport",
     "planning_state",
@@ -38,6 +39,11 @@
       "type": "string",
       "minLength": 1,
       "description": "Prefix that identifies a plan comment in Linear. Worker checks `comment.body.startsWith(plan_marker)` to decide whether reactions/replies count as plan interactions."
+    },
+    "needs_input_marker": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Prefix that identifies a 'legitimately parked, awaiting user input' comment in Linear. linear-implement's skill posts a question comment starting with this when it can't proceed without the user (ambiguous requirement, false plan premise, nothing to do). The Worker /verify (early Stop-hook) treats its presence as a pass so the agent isn't nagged to open a PR; the workflow's backstop verify classifies the run as `awaiting_input` (no Stuck, no replan). See W-311."
     },
     "agent_sessions_enabled": {
       "type": "boolean",

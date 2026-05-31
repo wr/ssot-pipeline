@@ -18,8 +18,9 @@ CFG=$(curl -fsS -m 8 "$CONFIG_URL" 2>/dev/null) || exit 0
 printf '%s' "$CFG" | jq -e . >/dev/null 2>&1 || exit 0
 
 CTX=$(printf '%s' "$CFG" | jq -r '
-  "Pipeline config (from the SSOT Worker /config endpoint). Where this skill refers to the plan marker, a Linear state name, the branch prefix, or the review-bot login, use these values:\n" +
+  "Pipeline config (from the SSOT Worker /config endpoint). Where this skill refers to the plan marker, the needs-input marker, a Linear state name, the branch prefix, or the review-bot login, use these values:\n" +
   "- plan marker (use verbatim as the first line of plan comments): \(.plan_marker // "(unset)")\n" +
+  "- needs-input marker (use verbatim as the first line of a comment when you park an issue awaiting user input): \(.needs_input_marker // "(unset)")\n" +
   "- planning state: \(.planning_state // "(unset)")\n" +
   "- plan-review state: \(.plan_review_state // "(unset)")\n" +
   "- in-progress state: \(.in_progress_state // "(unset)")\n" +
