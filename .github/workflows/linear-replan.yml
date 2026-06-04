@@ -12,6 +12,12 @@ on:
         required: true
       LINEAR_APP_TOKEN:
         required: true
+      # Optional (W-353). When set, a replan that auto-approves
+      # (next_state=in_progress) fires linear-implement via repository_dispatch —
+      # the default GITHUB_TOKEN can't trigger workflows this way. Without it the
+      # issue is left In Progress with a note to approve in the agent session.
+      GITHUB_DISPATCH_TOKEN:
+        required: false
 
 jobs:
   replan:
@@ -226,6 +232,9 @@ jobs:
           if [ "$STATE" = "$EXPECT_STATE" ] && [ "$PLAN_COUNT" -gt "${PLAN_COUNT_BEFORE:-0}" ]; then
             echo "✓ verification passed (state=$STATE, structured next_state=$SO_NEXT)"
             echo "needs_stuck=false" >> "$GITHUB_OUTPUT"
+            # Surfaced so the auto-implement step (W-353) knows whether the user
+            # greenlit a build (in_progress) or just wants another review round.
+            echo "next_state=$SO_NEXT" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -261,9 +270,62 @@ jobs:
         if: always() && steps.verify.outputs.needs_stuck == 'true'
         run: exit 1
 
-      - name: Agent session — updated-plan response
-        # Stream the replan outcome back into the agent session (W-258).
-        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.needs_stuck == 'false'
+      - name: Auto-implement when the replan was approved (W-353)
+        # When the user's reply both revised the plan AND greenlit it, the skill
+        # sets next_state=in_progress. Nothing watches that transition anymore
+        # (the Worker has been agent-session-only since W-243), so fire
+        # linear-implement here — mirroring how linear-implement.yml dispatches
+        # linear-replan for the reverse handoff. Needs GITHUB_DISPATCH_TOKEN (the
+        # default GITHUB_TOKEN can't trigger workflows via repository_dispatch);
+        # without it we leave a note so the issue doesn't silently stall.
+        if: always() && steps.verify.outputs.needs_stuck == 'false' && steps.verify.outputs.next_state == 'in_progress'
+        env:
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_DISPATCH_TOKEN:-}" ]; then
+            echo "::warning::next_state=in_progress but GITHUB_DISPATCH_TOKEN is unset — cannot auto-fire linear-implement. Leaving ${ISSUE} In Progress with a note."
+            GQL_URL=https://api.linear.app/graphql
+            BODY=$(printf '⏳ Plan approved — %s is **In Progress**, but automatic build dispatch is not configured on this repo (no `GITHUB_DISPATCH_TOKEN`). Reply **approve** in the @claude agent session to build. _(trace: %s)_' "$ISSUE" "$TRACE")
+            curl -sS -X POST "$GQL_URL" -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg id "$ISSUE_UUID" --arg body "$BODY" '{query:"mutation($id:String!,$body:String!){commentCreate(input:{issueId:$id,body:$body}){success}}",variables:{id:$id,body:$body}}')" > /dev/null || true
+            exit 0
+          fi
+          DISPATCH_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/dispatches"
+          PAYLOAD=$(jq -nc \
+            --arg issue "$ISSUE" \
+            --arg trace "$TRACE" \
+            --arg session "${AGENT_SESSION_ID:-}" \
+            '{event_type:"linear-implement",client_payload:{issue_id:$issue,trace_id:$trace,agent_session_id:$session}}')
+          HTTP=$(curl -sS -o /tmp/impl_dispatch.out -w '%{http_code}' -X POST "$DISPATCH_URL" \
+            -H "Authorization: Bearer ${GH_DISPATCH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "$PAYLOAD")
+          if [ "$HTTP" = "204" ]; then
+            echo "trace=${TRACE} dispatched linear-implement for ${ISSUE} (replan auto-approved)"
+          else
+            echo "::error::repository_dispatch to fire linear-implement failed (HTTP ${HTTP})."
+            cat /tmp/impl_dispatch.out || true
+            exit 1
+          fi
+
+      - name: Agent session — building response (auto-approved)
+        # The replan greenlit a build; tell the session we're building — not
+        # "reply approve", which would be wrong now that implement is dispatched.
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.needs_stuck == 'false' && steps.verify.outputs.next_state == 'in_progress'
+        uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
+        with:
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+          session_id: ${{ env.AGENT_SESSION_ID }}
+          type: response
+          body: "Approved — building ${{ env.ISSUE }} now. I'll open a PR for review."
+
+      - name: Agent session — updated-plan response (awaiting approval)
+        # Stream the replan outcome back into the agent session (W-258). Only the
+        # plan_review path — the in_progress path posts the building response above.
+        if: always() && env.AGENT_SESSION_ID != '' && steps.verify.outputs.needs_stuck == 'false' && steps.verify.outputs.next_state != 'in_progress'
         uses: wr/ssot-pipeline/.github/actions/post-agent-activity@main
         with:
           linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
