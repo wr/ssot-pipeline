@@ -32,7 +32,7 @@ Steps:
    - For `next_state: "plan_review"`: `_👉 Reply in the **@claude agent session** for this issue to approve ("ship it") or request more changes — not to this comment._\n\n_(trace: <TRACE>)_`
    (substitute the trace ID from the per-request context below)
 8. Set issue state via mcp__linear__save_issue:
-   - `next_state: "in_progress"` → set state to the in-progress state name from the session-start pipeline config (this transition is what the worker watches to fire linear-implement automatically).
+   - `next_state: "in_progress"` → set state to the in-progress state name from the session-start pipeline config. The linear-replan workflow then fires linear-implement automatically (W-353) — you don't need to do anything else to start the build.
    - `next_state: "plan_review"` → set state to the plan-review state name from the session-start pipeline config.
 
 Do not open PRs, do not commit code, do not @-mention.
