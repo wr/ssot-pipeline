@@ -19,7 +19,7 @@
   "approved_user_ids": [],
   "enforce_approved_users": false,
   "ceo": {
-    "enabled": false,
+    "enabled": true,
     "briefing_marker": "## 🧭 CEO Briefing",
     "chairman_linear_handle": "wells",
     "chairman_github_login": "wr",
