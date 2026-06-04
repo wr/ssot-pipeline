@@ -1,13 +1,14 @@
 // Worker test harness — covers HMAC signature, freshness window, approval-phrase
-// word-boundary regex, resolveRepo, DO dedup, and the agent-session dispatch
-// pipeline (the only remaining inbound path after the legacy Todo(AI)/reaction/
-// comment handlers were retired).
+// word-boundary regex, resolveRepo, DO dedup, the agent-session dispatch
+// pipeline, and the comment-reply dispatch path (W-349 — reply to a 📋 Plan
+// comment, complementing the agent-session `prompted` path).
 
 import { SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
   handleAgentSessionEvent,
+  handleCommentCreate,
   isAgentSessionPayload,
   log,
   lookupRepo,
@@ -17,6 +18,7 @@ import {
   verifySignature,
   type AgentSessionEvent,
   type Env,
+  type LinearEvent,
 } from "../src/index";
 import {
   agentActivityOkResponse,
@@ -572,6 +574,124 @@ cOsRsceEU29nO3ozBixFZtKoaBncHn2w9g8befGJWBdGxd+QZgdWrvXjVkt1UXbi
     expect(b.query).toContain("agentActivityCreate");
     expect(b.variables.input.agentSessionId).toBe("sess-9");
     expect(b.variables.input.content).toEqual({ type: "thought", body: "hi" });
+  });
+});
+
+// --- Comment-reply routing (W-349) ------------------------------------------
+// A human reply to a 📋 Plan comment routes like an agent-session `prompted`
+// reply: approval → linear-implement, else → linear-replan. The load-bearing
+// safety is the parent-is-a-plan-comment guard, which excludes the bot's own
+// (top-level) comments AND agent-session thread mirrors (whose parent is the
+// session root, not the plan comment) — so no self-trigger, no double-fire.
+
+describe("Comment-reply routing (W-349)", () => {
+  const fakeEnv = { LINEAR_APP_TOKEN: "linear-token", GITHUB_DISPATCH_TOKEN: "gh-token" } as unknown as Env;
+
+  // A reply Comment.create event. By default authored by a real user, threaded
+  // under "parent-plan" (which the mocks resolve to a plan comment on W-400).
+  const reply = (body: string, over: Record<string, unknown> = {}): LinearEvent =>
+    ({
+      type: "Comment",
+      action: "create",
+      actor: { type: "User" },
+      data: { id: "reply-1", body, parentId: "parent-plan", userId: "user-x" },
+      ...over,
+    }) as unknown as LinearEvent;
+
+  // fetchComment(parentId) → a plan comment on a mapped issue (W-400).
+  const planParent = {
+    match: (u: string, init?: RequestInit) =>
+      u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("comment(id:"),
+    respond: () =>
+      new Response(
+        JSON.stringify({ data: { comment: { id: "parent-plan", body: `${PLAN_MARKER_LINE}\nthe plan`, issue: { identifier: "W-400", project: { id: SSOT_PROJECT_ID } } } } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+  };
+  const ghDispatch = { match: (u: string) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() };
+
+  it("approval reply to a plan comment → fires linear-implement", async () => {
+    const mock = installFetchMock([planParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("ship it"), fakeEnv, "t");
+    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
+    expect(dispatch).toBeDefined();
+    const d = JSON.parse(dispatch!.body!);
+    expect(d.event_type).toBe("linear-implement");
+    expect(d.client_payload.issue_id).toBe("W-400");
+  });
+
+  it("non-approval reply to a plan comment → fires linear-replan off that comment id", async () => {
+    const mock = installFetchMock([planParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("also handle the empty case"), fakeEnv, "t");
+    const d = JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!);
+    expect(d.event_type).toBe("linear-replan");
+    expect(d.client_payload.issue_id).toBe("W-400");
+    expect(d.client_payload.comment_id).toBe("reply-1");
+  });
+
+  it("a new approval word from the broadened list (e.g. 'punch it') also implements", async () => {
+    const mock = installFetchMock([planParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("punch it"), fakeEnv, "t");
+    expect(JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!).event_type).toBe("linear-implement");
+  });
+
+  it("top-level comment (no parent) → no fetch, no dispatch", async () => {
+    const mock = installFetchMock([planParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("ship it", { data: { id: "c1", body: "ship it" } }), fakeEnv, "t");
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("reply to a NON-plan comment (e.g. an agent-session thread mirror) → no dispatch (no double-fire)", async () => {
+    const nonPlanParent = {
+      match: (u: string, init?: RequestInit) =>
+        u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("comment(id:"),
+      respond: () =>
+        new Response(
+          JSON.stringify({ data: { comment: { id: "parent-plain", body: "a normal comment, not a plan", issue: { identifier: "W-401", project: { id: SSOT_PROJECT_ID } } } } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    };
+    const mock = installFetchMock([nonPlanParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("ship it"), fakeEnv, "t");
+    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
+  });
+
+  it("the app's own (non-User actor) comment → skipped, never fetches or dispatches", async () => {
+    const mock = installFetchMock([planParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" } }), fakeEnv, "t");
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("reply on an unmapped project → no dispatch", async () => {
+    const unmappedParent = {
+      match: (u: string, init?: RequestInit) =>
+        u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("comment(id:"),
+      respond: () =>
+        new Response(
+          JSON.stringify({ data: { comment: { id: "parent-plan", body: `${PLAN_MARKER_LINE}\nx`, issue: { identifier: "W-402", project: { id: "00000000-0000-0000-0000-000000000000" } } } } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    };
+    const mock = installFetchMock([unmappedParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("ship it"), fakeEnv, "t");
+    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
+  });
+
+  it("end-to-end: POST /linear Comment.create reply → 200 + dispatch (routing wired in)", async () => {
+    const mock = installFetchMock([planParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    const body = JSON.stringify({ type: "Comment", action: "create", actor: { type: "User" }, data: { id: "reply-e2e", body: "ship it", parentId: "parent-plan", userId: "u" } });
+    const req = await buildWebhookRequest({ body, linearEvent: "Comment" });
+    const resp = await SELF.fetch(req);
+    expect(resp.status).toBe(200);
+    expect(JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!).event_type).toBe("linear-implement");
   });
 });
 
