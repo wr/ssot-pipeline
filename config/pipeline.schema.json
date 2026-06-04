@@ -93,7 +93,7 @@
         "type": "string",
         "minLength": 1
       },
-      "description": "Substrings (case-insensitive) in a reply comment that count as plan approval. Worker uses `bodyLower.includes(phrase.toLowerCase())`."
+      "description": "Phrases (case-insensitive) in a reply that count as plan approval and fast-path straight to linear-implement. Worker's matchesApprovalPhrase() uses word-boundary matching for word phrases (`\\bphrase\\b`, so `ship it` matches `Ship it!` but not `shipping it`) and substring matching for emoji-only phrases (👍/✅/🚀). Keep only UNAMBIGUOUS approvals here — short/common words like bare `go` are intentionally omitted so a change-request like `go ahead and tweak X` doesn't false-fire an implement; those ride linear-replan's LLM intent judge instead (W-132)."
     },
     "branch_prefix": {
       "type": "string",
