@@ -1,0 +1,206 @@
+name: ai-ceo
+
+# The autonomous "AI CEO" (W-358). Runs on a schedule, surveys product health,
+# acts within the hard guardrails in config/pipeline.json `ceo`, and posts a
+# briefing to the human chairman in Linear.
+#
+# DORMANT BY DEFAULT. The job always runs on schedule, but the `gate` step below
+# no-ops (green, no actions) unless `ceo.enabled` is true in the served config.
+# Flipping `ceo.enabled` to true (and redeploying the Worker) is the chairman's
+# go-live switch. Auto-merge is a SECOND gate (`ceo.autonomy.auto_merge`) so the
+# CEO can run in propose+ops mode before it's ever granted code-merge authority.
+#
+# Meta-repo only — this is the one workflow in this repo that legitimately has
+# `on:` triggers (it operates ON the product, dogfooding-style). Target repos do
+# not consume it.
+
+on:
+  schedule:
+    - cron: "0 15 * * *" # daily ~07:00 PT / 10:00 ET
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Survey + brief only — take no mutating actions even if enabled"
+        type: boolean
+        default: false
+
+# Least privilege: read code, read CI. Issue/PR writes go through the Linear MCP
+# (LINEAR_APP_TOKEN) and `gh` (GITHUB_TOKEN). contents/pull-requests write are
+# present so the CEO can squash-merge a PR once auto_merge is granted; under
+# branch protection a merge still requires green checks + the reviewer-bot
+# approval, so this permission alone can't bypass the human-equivalent gate.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  ceo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One CEO run at a time; never cancel an in-flight run mid-action.
+    concurrency:
+      group: ai-ceo
+      cancel-in-progress: false
+    env:
+      CONFIG_URL: ${{ vars.SSOT_WORKER_URL }}
+      CEO_PROJECT: "SSOT Pipeline"
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+    steps:
+      - name: Trace + gate on ceo.enabled
+        id: gate
+        run: |
+          set -euo pipefail
+          TRACE=$(openssl rand -hex 4)
+          JOB_START=$(date -u +%s)
+          echo "trace=${TRACE}" >> "$GITHUB_OUTPUT"
+          echo "job_start=${JOB_START}" >> "$GITHUB_OUTPUT"
+          echo "🔗 trace=${TRACE} ai-ceo (dry_run=${DRY_RUN})"
+
+          if [ -z "${CONFIG_URL:-}" ]; then
+            echo "::warning::SSOT_WORKER_URL variable not set — cannot fetch config. CEO no-op."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CFG=$(curl -fsS --retry 3 --max-time 15 "$CONFIG_URL") || {
+            echo "::warning::Failed to fetch config from $CONFIG_URL — CEO no-op."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          ENABLED=$(echo "$CFG" | jq -r '.ceo.enabled // false')
+          if [ "$ENABLED" != "true" ]; then
+            echo "::notice::ceo.enabled is not true — CEO dormant, no-op (trace=${TRACE})."
+            echo "## 🧭 AI CEO dormant" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`ceo.enabled\` is \`${ENABLED}\`. Flip it to \`true\` in config/pipeline.json and redeploy the Worker to arm the CEO." >> "$GITHUB_STEP_SUMMARY"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Stash the ceo block + a couple of state names for downstream steps.
+          CEO_JSON=$(echo "$CFG" | jq -c '.ceo')
+          DIGEST_ISSUE=$(echo "$CFG" | jq -r '.ceo.digest_issue_id // ""')
+          BRIEFING_MARKER=$(echo "$CFG" | jq -r '.ceo.briefing_marker // "## 🧭 CEO Briefing"')
+          MCP_URL=$(echo "$CFG" | jq -r '.linear_mcp_url // ""')
+          MCP_TRANSPORT=$(echo "$CFG" | jq -r '.linear_mcp_transport // "http"')
+          {
+            echo "enabled=true"
+            echo "digest_issue=${DIGEST_ISSUE}"
+            echo "briefing_marker=${BRIEFING_MARKER}"
+            echo "mcp_url=${MCP_URL}"
+            echo "mcp_transport=${MCP_TRANSPORT}"
+            echo "ceo_json<<EOF"
+            echo "$CEO_JSON"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "✓ CEO enabled — digest_issue=${DIGEST_ISSUE} (trace=${TRACE})"
+
+      - uses: actions/checkout@v6
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          fetch-depth: 1
+
+      - name: Write MCP config
+        if: steps.gate.outputs.enabled == 'true'
+        uses: wr/ssot-pipeline/.github/actions/write-mcp-config@main
+        with:
+          mcp_url: ${{ steps.gate.outputs.mcp_url }}
+          mcp_transport: ${{ steps.gate.outputs.mcp_transport }}
+          linear_token: ${{ secrets.LINEAR_APP_TOKEN }}
+
+      - name: Fetch pipeline plugin
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/wr/ssot-pipeline "$RUNNER_TEMP/ssot-plugin"
+          git -C "$RUNNER_TEMP/ssot-plugin" sparse-checkout set plugins/ssot-agents
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.gate.outputs.enabled == 'true'
+        id: claude
+        env:
+          MAX_THINKING_TOKENS: '16000'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Scheduled runs are actored by the repo owner; allow github-actions in
+          # case a future trigger surfaces as that bot.
+          allowed_bots: "github-actions"
+          additional_permissions: |
+            actions: read
+          prompt: |
+            /ai-ceo
+
+            Today's date: ${{ github.run_started_at }}
+            Trace ID (for the briefing trailer): ${{ steps.gate.outputs.trace }}
+            Dry run (if true, survey + brief only — take NO mutating actions): ${{ env.DRY_RUN }}
+            Project to operate on: ${{ env.CEO_PROJECT }}
+            Digest issue (post your briefing here): ${{ steps.gate.outputs.digest_issue }}
+
+            ceo_config (your authority + guardrails — the sole source of what you may do):
+            ${{ steps.gate.outputs.ceo_json }}
+          claude_args: |
+            --plugin-dir ${{ runner.temp }}/ssot-plugin/plugins/ssot-agents
+            --permission-mode bypassPermissions
+            --mcp-config /tmp/mcp.json
+            --max-turns 40
+            --model claude-opus-4-7
+            --allowedTools "mcp__linear__get_issue" "mcp__linear__list_issues" "mcp__linear__list_comments" "mcp__linear__save_comment" "mcp__linear__save_issue" "mcp__linear__get_project" "mcp__linear__list_projects" "mcp__linear__list_documents" "mcp__linear__get_document" "mcp__linear__list_issue_labels" "mcp__github__pull_request_read" "mcp__github__list_pull_requests" "mcp__github__get_pull_request" "mcp__github__list_issues" "Bash" "Read" "Grep" "Glob"
+            --disallowedTools "Bash(rm *)" "Bash(rm:*)" "Bash(sudo *)" "Bash(curl *)" "Bash(wget *)" "Bash(nc *)" "Bash(ncat *)" "Bash(ssh *)" "Bash(scp *)" "Bash(rsync *)" "Bash(git push --force*)" "Bash(git push -f*)" "Bash(git push --mirror*)" "Bash(git push --delete*)" "Bash(git remote add *)" "Bash(git remote set-url *)" "Bash(git reset --hard*)" "Bash(git update-ref -d *)" "Bash(gh repo delete*)" "Bash(gh repo edit*)" "Bash(gh repo archive*)" "Bash(gh repo create*)" "Bash(gh repo transfer*)" "Bash(gh secret*)" "Bash(gh variable*)" "Bash(gh release delete*)" "Bash(gh workflow disable*)" "Bash(gh workflow enable*)" "Bash(gh api -X DELETE*)" "Bash(gh api --method DELETE*)" "Bash(gh auth*)" "Bash(gh ssh-key*)" "Bash(gh gpg-key*)" "WebFetch" "WebSearch" "Write" "Edit" "Read(./.env)" "Read(./.env.*)" "Read(./**/secrets/**)" "Read(./**/.env*)"
+            --json-schema '{"type":"object","additionalProperties":false,"required":["briefing_posted","actions_taken","decisions_for_chairman","next_focus"],"properties":{"briefing_posted":{"type":"boolean"},"actions_taken":{"type":"array","items":{"type":"string"},"maxItems":50},"issues_created":{"type":"array","items":{"type":"string"},"maxItems":50},"issues_delegated":{"type":"array","items":{"type":"string"},"maxItems":20},"prs_merged":{"type":"array","items":{"type":"string"},"maxItems":20},"decisions_for_chairman":{"type":"array","items":{"type":"string"},"maxItems":20},"health":{"type":"object","additionalProperties":false,"properties":{"stuck_issues":{"type":"integer"},"open_prs":{"type":"integer"},"notes":{"type":"string","maxLength":500}}},"next_focus":{"type":"string","maxLength":500}}}'
+
+      - name: Verify briefing was posted
+        id: verify
+        if: always() && steps.gate.outputs.enabled == 'true'
+        env:
+          LINEAR_APP_TOKEN: ${{ secrets.LINEAR_APP_TOKEN }}
+          DIGEST_ISSUE: ${{ steps.gate.outputs.digest_issue }}
+          BRIEFING_MARKER: ${{ steps.gate.outputs.briefing_marker }}
+          JOB_START: ${{ steps.gate.outputs.job_start }}
+          TRACE: ${{ steps.gate.outputs.trace }}
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DIGEST_ISSUE:-}" ]; then
+            echo "::warning::No digest_issue_id configured — cannot verify briefing. Skipping."
+            exit 0
+          fi
+          GQL_URL=https://api.linear.app/graphql
+          RESP=$(curl -sS -X POST "$GQL_URL" \
+            -H "Authorization: Bearer ${LINEAR_APP_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg id "$DIGEST_ISSUE" '{query:"query($id:String!){issue(id:$id){id comments{nodes{body createdAt}}}}",variables:{id:$id}}')")
+
+          ISSUE_UUID=$(echo "$RESP" | jq -r '.data.issue.id // ""')
+          if [ -z "$ISSUE_UUID" ] || [ "$ISSUE_UUID" = "null" ]; then
+            echo "::error::Linear returned no issue for digest_issue_id=${DIGEST_ISSUE} (trace=${TRACE}). LINEAR_APP_TOKEN dead, or the id is wrong. Raw:"
+            echo "$RESP" | jq -c '.errors // .data // .' || echo "$RESP"
+            exit 1
+          fi
+
+          # Newest briefing-marker comment must have been created during this run.
+          LATEST_TS=$(echo "$RESP" | jq -r --arg m "$BRIEFING_MARKER" \
+            '[.data.issue.comments.nodes[] | select(.body | startswith($m)) | .createdAt] | sort | last // ""')
+          if [ -z "$LATEST_TS" ]; then
+            echo "::error::No briefing comment (starting with \"${BRIEFING_MARKER}\") found on ${DIGEST_ISSUE} (trace=${TRACE}). The CEO run did not report — treating as a failed run."
+            exit 1
+          fi
+          LATEST_EPOCH=$(date -u -d "$LATEST_TS" +%s 2>/dev/null || echo 0)
+          if [ "$LATEST_EPOCH" -lt "$JOB_START" ]; then
+            echo "::error::Latest briefing on ${DIGEST_ISSUE} (${LATEST_TS}) predates this run — the CEO did not post a fresh briefing (trace=${TRACE})."
+            exit 1
+          fi
+          echo "✓ Fresh briefing posted on ${DIGEST_ISSUE} at ${LATEST_TS} (trace=${TRACE})"
+
+          # Surface the headline structured output in the run summary.
+          if [ -n "${STRUCTURED_OUTPUT:-}" ] && echo "$STRUCTURED_OUTPUT" | jq -e . >/dev/null 2>&1; then
+            {
+              echo "## 🧭 AI CEO run (trace ${TRACE})"
+              echo "- actions: $(echo "$STRUCTURED_OUTPUT" | jq -c '.actions_taken // []')"
+              echo "- issues created: $(echo "$STRUCTURED_OUTPUT" | jq -c '.issues_created // []')"
+              echo "- delegated: $(echo "$STRUCTURED_OUTPUT" | jq -c '.issues_delegated // []')"
+              echo "- merged: $(echo "$STRUCTURED_OUTPUT" | jq -c '.prs_merged // []')"
+              echo "- decisions for chairman: $(echo "$STRUCTURED_OUTPUT" | jq -c '.decisions_for_chairman // []')"
+              echo "- next: $(echo "$STRUCTURED_OUTPUT" | jq -r '.next_focus // ""')"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
