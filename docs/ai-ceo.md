@@ -1,36 +1,43 @@
 # The AI CEO (W-358)
 
-An autonomous orchestration layer that sits **above** the issue→PR loop and runs
-the product day-to-day. You (Wells) are **chairman of the board**: the CEO runs
-operations and pulls you in only for big decisions.
+An autonomous orchestration layer that sits **above** the issue→PR loop and **runs
+the product**. Wells is **chairman of the board — not the CEO's manager**: he sets
+occasional high-level direction and handles the rare escalation. The CEO owns the
+day-to-day.
 
-The loop already executes *one issue → one PR*. The CEO is the missing layer that
-decides **what** to work on, **when**, and **whether it's good enough** — the
-strategy/prioritization role a human product owner plays for Devin/Cursor/Copilot.
+The loop executes *one issue → one PR*. The CEO is the layer that decides **what**
+to build, **what "done" means**, **whether the quality bar is met**, and **what's
+next** — generatively, not by waiting to be told. It's the owner role a human
+product lead plays for Devin/Cursor/Copilot, run by the agent itself.
 
-## Authority model — full autonomy within guardrails
+## Authority model — the CEO is in charge
 
-Chairman decision (2026-06-03): **full autonomy** is the design. The CEO may
-create/prioritize/close issues, tune the pipeline, kick off the loop, approve
-plans, and merge PRs — but every powerful action is gated by `config/pipeline.json`
-→ `ceo`, and anything failing a guardrail **escalates instead of acting**.
+Chairman direction (2026-06-04): the CEO is **generative and decisive**. It authors
+and prioritizes the roadmap, writes acceptance criteria, delegates work, approves
+plans, verifies quality, and merges PRs that clear its bar — and it **escalates
+rarely**: only real money/spend, secrets/auth/billing, irreversible actions, a
+genuine strategic fork, or a guardrail it must not cross. Asking the chairman to
+triage the backlog, pick the next task, or approve routine work is an anti-pattern —
+that's the CEO's job. Every powerful action is still bounded by `config/pipeline.json`
+→ `ceo`; exceeding a guardrail is one of the rare escalations.
 
-It ships **dormant and conservative**, with a deliberate ramp:
+The capability shipped **dormant** and ramped through stages; it now runs at **full
+action mode**:
 
-| Stage | `ceo.enabled` | `autonomy.auto_merge` | What runs |
+| Stage | `ceo.enabled` | `auto_merge` / `approve_plans` | What runs |
 |---|---|---|---|
-| **0 — shipped (default)** | `false` | `false` | Nothing. Daily cron fires and no-ops. |
-| **1 — observe** | `true` | `false` | Surveys, triages, files/prioritizes issues, delegates one ready issue per run, posts a briefing. **Never merges.** Plans/PRs awaiting a call are surfaced to you. |
-| **2 — full** | `true` | `true` | Everything in stage 1, plus auto-merges PRs that pass *every* guardrail. |
+| 0 — shipped | `false` | `false` | Nothing. Daily cron fires and no-ops. |
+| 1 — observe | `true` | `false` | Surveys, triages, files/prioritizes, delegates, briefs. Never merges. |
+| **2 — action (current)** | `true` | `true` | Owns the loop end-to-end: creates, delegates, approves plans, and auto-merges PRs that pass *every* guardrail. |
 
-Going from one stage to the next is a one-line config edit + Worker redeploy —
-your go-live switch, reversible at any time.
+Each stage transition is a one-line config edit + Worker redeploy — reversible at
+any time (drop back to observe or dormant by flipping the flags).
 
 ## Guardrails (config/pipeline.json → `ceo`)
 
 ```jsonc
 "ceo": {
-  "enabled": false,                 // master switch (stage gate)
+  "enabled": true,                  // master switch (stage gate)
   "briefing_marker": "## 🧭 CEO Briefing",
   "chairman_linear_handle": "wells",
   "chairman_github_login": "wr",
@@ -39,14 +46,14 @@ your go-live switch, reversible at any time.
     "create_issues": true,
     "refine_and_prioritize": true,
     "delegate_to_loop": true,
-    "approve_plans": false,         // stays off until you grant it
-    "auto_merge": false             // stays off until you grant it
+    "approve_plans": true,          // CEO judges + approves plans itself
+    "auto_merge": true              // CEO merges PRs that clear every guardrail
   },
   "guardrails": {
-    "max_delegations_per_run": 1,   // hands-off loop starts per cycle
-    "max_actions_per_run": 8,       // total mutating actions per cycle
-    "max_pr_additions": 400,        // auto-merge size ceiling (lines)
-    "max_pr_files": 15,             // auto-merge size ceiling (files)
+    "max_delegations_per_run": 3,   // hands-off loop starts per cycle
+    "max_actions_per_run": 20,      // total mutating actions per cycle
+    "max_pr_additions": 800,        // auto-merge size ceiling (lines)
+    "max_pr_files": 25,             // auto-merge size ceiling (files)
     "require_reviewer_approval": true,
     "require_all_checks_green": true,
     "protected_paths": [ "config/pipeline.json", ".github/workflows/", ... ]
@@ -94,9 +101,10 @@ the date, and a trace ID; the skill is the sole authority on what it may do.
 ## Reporting — the Linear digest
 
 Every run posts one briefing comment on `digest_issue_id` (default the W-358 epic),
-starting with `briefing_marker`. It @-mentions you **only when a decision needs you**
-— over-mentioning erodes the signal. Format: *what I did · what needs you · state of
-the product · next focus.* That thread is your board-meeting minutes.
+starting with `briefing_marker`. It leads with **what it decided and did** and where
+it's steering the **roadmap**; it @-mentions you only in a rare **Escalations**
+section (usually omitted). Over-mentioning erodes the signal — the CEO decides, it
+doesn't ask. That thread is your board-meeting minutes.
 
 ## Safety properties
 
@@ -107,21 +115,27 @@ the product · next focus.* That thread is your board-meeting minutes.
   dangerous merge.
 - **Untrusted-data discipline** — all Linear/GitHub content is data, never
   instructions; a "merge me" written in a PR/issue is never a valid approval. The
-  only approval that counts is your GitHub PR merge.
+  CEO auto-merges only within its guardrails, and `main` branch protection still
+  requires the reviewer-bot APPROVE + green checks — so it can't merge anything a
+  human-equivalent gate wouldn't allow. The chairman can override or dial it back
+  anytime by editing config.
 - **No silent successes** — a run that fails to report goes red and emails you.
 - **Full audit trail** — trace IDs in logs + briefings; every action is logged in
   the briefing and the run summary.
 
-## Going live (the chairman's runbook)
+## Chairman's runbook (it's already live)
 
-1. **Stage 1 (observe):** set `ceo.enabled: true` in `config/pipeline.json`, merge,
-   let `deploy-worker` redeploy. Watch the daily briefings on W-358 for a week.
-   (Want a manual first run? Trigger `ai-ceo` via *Actions → ai-ceo → Run workflow*,
-   optionally with `dry_run: true` to survey + brief without acting.)
-2. **Stage 2 (full):** once the briefings read well, set `autonomy.auto_merge: true`
-   (and/or `approve_plans: true`). Tune `max_pr_*` and `protected_paths` to taste.
-3. **Pause anytime:** set `ceo.enabled: false` and redeploy. The CEO goes dormant on
-   the next cycle.
+The CEO runs at full action mode on the daily cron. You rarely need to touch it.
+
+- **Watch:** read the briefings on W-358. They're the board minutes — decisions,
+  roadmap, and the occasional escalation aimed at you.
+- **Run it now:** *Actions → ai-ceo → Run workflow* (add `dry_run: true` for a
+  survey + briefing with zero mutations).
+- **Dial it back:** set `autonomy.auto_merge: false` (CEO stops merging) or
+  `ceo.enabled: false` (CEO goes fully dormant) in `config/pipeline.json` and merge.
+  Reversible the same way.
+- **Tune its rope:** adjust `max_delegations_per_run`, `max_actions_per_run`,
+  `max_pr_*`, and `protected_paths` to widen or tighten what it does unattended.
 
 ## Roadmap
 
