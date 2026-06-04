@@ -11,7 +11,7 @@
   "in_progress_state": "In Progress",
   "in_review_state": "In Review",
   "stuck_state": "Stuck",
-  "approval_phrases": ["ship it", "lgtm", "looks good", "approve", "approved", "go for it", "👍", "✅"],
+  "approval_phrases": ["ship it", "ship", "lgtm", "looks good", "approve", "approved", "accepted", "go for it", "send it", "do it", "punch it", "yolo", "make it so", "let's go", "👍", "✅", "🚀"],
   "branch_prefix": "wells/",
   "pr_fix_max_attempts": 2,
   "review_bot_login": "wr-claude-reviewer[bot]",

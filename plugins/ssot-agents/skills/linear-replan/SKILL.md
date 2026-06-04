@@ -22,8 +22,10 @@ Steps:
 5. Write a revised plan addressing the user's feedback, incorporating the full thread context.
 6. **Decide the next state.** Read the user's reply (the replan-trigger comment from step 3) and judge whether they've authorized implementation to proceed once your revised plan is in:
    - Explicit approval after the changes ("change xyz, then go" / "fix the typo and ship" / "lgtm with these tweaks") → `next_state: "in_progress"`.
+   - A bare go-signal on its own — even a single informal word — means "approved, proceed": `go`, `go ahead`, `send it`, `do it`, `punch it`, `yolo`, `make it so`, `let's go`, `ship`, `that works`, `perfect`. (The Worker hard-matches the most unambiguous of these straight to implement; when one instead lands here as a replan, honor it as approval.) → `next_state: "in_progress"`.
    - Pure imperative directives with no further questions ("add a readme", "use Sonnet 4.5", "drop the validation step") → `next_state: "in_progress"` — imperative form alone implies "do this".
    - Open-ended change requests with no go signal ("change xyz", "what about Y?", "consider Z", "thoughts on...") → `next_state: "plan_review"`.
+   - A go-signal *combined with* substantive changes ("go ahead, but also switch to Sonnet") means apply the changes then proceed → `next_state: "in_progress"`.
    - When in doubt, prefer `plan_review`. Extra wait is cheap; auto-implementing against intent is expensive.
 7. Post the revised plan as a new TOP-LEVEL comment (not a reply) via mcp__linear__save_comment.
    Body MUST start with the exact plan marker from the session-start pipeline config.

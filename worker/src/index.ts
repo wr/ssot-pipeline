@@ -214,6 +214,14 @@ async function handleLinearWebhook(req: Request, env: Env, ctx: ExecutionContext
       handleAgentSessionEvent(event as unknown as AgentSessionEvent, env, trace, ctx);
       return new Response("ok");
     }
+    // A human reply to a 📋 Plan comment (W-349) — complements the agent-session
+    // `prompted` path so a user can respond EITHER in the session OR by replying
+    // to the plan comment. handleCommentCreate's parent-is-a-plan-comment guard
+    // makes this safe against self-triggering and double-firing (see its doc).
+    if (event.type === "Comment" && event.action === "create") {
+      await handleCommentCreate(event, env, trace);
+      return new Response("ok");
+    }
     log("info", "webhook_ignored", { trace, event_type: event.type, event_action: event.action });
     return new Response("ok");
   } catch (err) {
@@ -556,6 +564,111 @@ export async function postAgentActivity(
   });
 }
 
+// --- Comment-reply routing (W-349) ------------------------------------------
+//
+// Routes a human reply to a 📋 Plan comment, complementing the agent-session
+// `prompted` path so a user can respond EITHER in the @claude agent session OR
+// by replying to the plan comment. (Removed in W-262 when the loop went
+// agent-session-only; revived now that the @claude app webhook also delivers
+// Comment data-change events on the same signing secret — see W-349.)
+//
+// Self-trigger and double-fire safety is STRUCTURAL, not heuristic:
+//   - Every bot-authored comment (the plan comment, "Follow-up via agent
+//     session", revised plans) is posted TOP-LEVEL, so the parentId + plan-
+//     marker-parent guards below skip them — the Worker never reacts to itself.
+//   - An in-session reply that Linear mirrors into the session thread has the
+//     session root as its parent (not the standalone plan comment), so it also
+//     fails the plan-marker-parent guard — no second dispatch alongside
+//     `prompted`. The optional actor.type check is belt-and-suspenders on top.
+export async function handleCommentCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
+  const comment = event.data as LinearComment | undefined;
+
+  // Belt-and-suspenders: when the webhook tells us who acted, skip non-user
+  // actors (the app's own OauthClient comments, integrations). The plan-marker-
+  // parent guard below is the load-bearing self-trigger defense.
+  if (event.actor?.type && event.actor.type !== "User") {
+    log("info", "comment_skip", { trace, reason: "non_user_actor", actor_type: event.actor.type });
+    return;
+  }
+
+  // Only a threaded reply can be a reply to a plan comment.
+  if (!comment || !comment.parentId) {
+    log("info", "comment_skip", { trace, reason: "top_level_no_parent" });
+    return;
+  }
+
+  // Optional approval gate (OFF by default), mirroring the agent-session path:
+  // when enforce_approved_users is on, only an approved author drives the loop.
+  if ((config as { enforce_approved_users?: boolean }).enforce_approved_users === true) {
+    if (!comment.userId || !(config.approved_user_ids as string[]).includes(comment.userId)) {
+      log("info", "comment_skip", { trace, reason: "non_approved_user", user_id: comment.userId ?? null });
+      return;
+    }
+  }
+
+  const parent = await fetchComment(comment.parentId, env, trace);
+  if (!parent) {
+    log("info", "comment_skip", { trace, reason: "parent_fetch_failed", parent_id: comment.parentId });
+    return;
+  }
+  if (!parent.body.startsWith(config.plan_marker)) {
+    log("info", "comment_skip", { trace, reason: "reply_to_non_plan", parent_id: comment.parentId });
+    return;
+  }
+
+  const issueId = parent.issue?.identifier;
+  const projectId = parent.issue?.project?.id;
+  if (!issueId || !projectId) {
+    log("info", "comment_skip", { trace, reason: "missing_issue_or_project", parent_id: comment.parentId });
+    return;
+  }
+
+  const repo = resolveRepo(projectId, `Comment.create on issue ${issueId}`, trace);
+  if (!repo) return;
+
+  // Same approval semantics as the agent-session reply: a hard-matched approval
+  // phrase fast-paths to implement; anything else re-plans off this very comment
+  // (linear-replan reads its instruction from the comment id — no need to
+  // materialize a new comment like the session path does).
+  const isApproval = (config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(comment.body ?? "", p));
+  if (isApproval) {
+    log("info", "comment_dispatch", { trace, issue_id: issueId, event_type: "linear-implement", reason: "approval_phrase", comment_id: comment.id });
+    await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace }, env, trace);
+    return;
+  }
+  log("info", "comment_dispatch", { trace, issue_id: issueId, event_type: "linear-replan", comment_id: comment.id });
+  await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: comment.id, trace_id: trace }, env, trace);
+}
+
+// Fetch a Linear comment by id (used to read the PARENT of a reply, so we can
+// confirm it's a plan comment and resolve its issue→project). Best-effort:
+// returns null on any failure (caller logs a skip).
+async function fetchComment(commentId: string, env: Env, trace: string): Promise<LinearComment | null> {
+  const query = `query($id: String!) { comment(id: $id) { id body issue { identifier project { id } } } }`;
+  try {
+    const resp = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables: { id: commentId } }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      log("error", "linear_fetch_comment_failed", { trace, status: resp.status, body: text });
+      return null;
+    }
+    const data = JSON.parse(text) as { data?: { comment?: LinearComment }; errors?: unknown };
+    if (data.errors) {
+      log("error", "linear_fetch_comment_graphql_errors", { trace, errors: data.errors });
+      return null;
+    }
+    return data.data?.comment ?? null;
+  } catch (err) {
+    log("error", "linear_fetch_comment_error", { trace, error: err instanceof Error ? `${err.name}: ${err.message}` : String(err) });
+    return null;
+  }
+}
+
 // GET /verify?issue=W-NN&kind=pickup|implement — assert a workflow's expected
 // post-conditions and return { pass, reason }. Used by the ssot-agents plugin's
 // Stop hook to let the agent self-correct a wrong outcome *before* the run ends.
@@ -838,5 +951,24 @@ function timingSafeEqual(a: string, b: string): boolean {
 export type LinearEvent = {
   type: string;
   action: string;
+  // Top-level actor on data-change webhooks (User | OauthClient | Integration).
+  // Used by handleCommentCreate to skip the app's own (OauthClient) comments.
+  actor?: { id?: string; type?: string } | null;
+  // Entity payload — shape depends on `type` (cast per-handler, e.g. LinearComment).
+  data?: unknown;
   webhookTimestamp?: number;
+};
+
+// Comment data-change payload (event.data when type === "Comment"). `parentId`
+// is present on the webhook for threaded replies; `issue`/`project` are resolved
+// from the PARENT via fetchComment, not assumed inline on the reply.
+type LinearComment = {
+  id: string;
+  body: string;
+  parentId?: string;
+  userId?: string;
+  issue?: {
+    identifier?: string;
+    project?: { id?: string };
+  };
 };
