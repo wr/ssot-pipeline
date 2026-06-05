@@ -127,8 +127,6 @@ ok "Fork: $FORK_REPO"
 phase "Phase 3 — configure config/pipeline.json"
 CUR_BRANCH_PREFIX=$(jq -r '.branch_prefix' "$CONFIG")
 CUR_REVIEWER=$(jq -r '.review_bot_login' "$CONFIG")
-CUR_PROJECT_MAP=$(jq -c '.project_to_repo' "$CONFIG")
-
 DEFAULT_PREFIX="${FORK_OWNER}/"
 NEW_PREFIX=$(prompt_default "branch_prefix" "${CUR_BRANCH_PREFIX:-$DEFAULT_PREFIX}")
 DEFAULT_REVIEWER="${FORK_OWNER}-claude-reviewer[bot]"
@@ -141,15 +139,11 @@ jq --indent 2 \
   --arg owner "$FORK_OWNER" \
   '.branch_prefix = $prefix
    | .review_bot_login = $reviewer
-   | .fix_reviewer_logins = [$reviewer, $owner]
-   | (if (.project_to_repo // {}) | length == 0 then . else .project_to_repo = {} end)' \
+   | .fix_reviewer_logins = [$reviewer, $owner]' \
   "$CONFIG" > "$TMPFILE"
 if ! diff -q "$CONFIG" "$TMPFILE" >/dev/null 2>&1; then
   mv "$TMPFILE" "$CONFIG"
   ok "Updated config/pipeline.json (branch_prefix=$NEW_PREFIX, reviewer=$NEW_REVIEWER)"
-  if [ "$CUR_PROJECT_MAP" != "{}" ]; then
-    warn "Cleared project_to_repo (init-target-repo.sh re-populates per project)"
-  fi
 else
   rm -f "$TMPFILE"
   ok "config/pipeline.json already configured"
