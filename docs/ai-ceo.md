@@ -137,9 +137,24 @@ The CEO runs at full action mode on the daily cron. You rarely need to touch it.
 - **Tune its rope:** adjust `max_delegations_per_run`, `max_actions_per_run`,
   `max_pr_*`, and `protected_paths` to widen or tighten what it does unattended.
 
+## Loop health signal (W-362)
+
+The CEO doesn't introspect the loop — it reads an aggregated weekly digest.
+`.github/workflows/eval-harness.yml` runs Mondays 14:00 UTC, queries Linear
+state history + GitHub PR data for the past `sli.window_days` (default 7), and
+posts one structured `## 📉 Loop SLI` comment to the dedicated tracking issue
+configured as `sli.tracking_issue_id` (W-376). Each comment carries
+`success_rate`, `mean_fix_cycles`, `stuck_rate`, `human_edit_rate`, and
+`workflow_minutes`. The survey step reads the most recent comment and surfaces
+the headline numbers in every briefing's Loop SLI line — so the CEO has an
+objective health signal it can reference without standing up its own
+instrumentation. Both knobs are optional: when `tracking_issue_id` is empty, the
+harness no-ops and the Loop SLI clause is omitted from the briefing.
+
 ## Roadmap
 
 The CEO is the orchestration hub for the rest of the backlog: it consumes the
-loop success-rate metrics (W-362) to steer, drives parallel execution (W-360) by
-choosing batches, and reports against the competitive gaps the backlog encodes.
-v1 operates on the SSOT Pipeline project; expand to other target repos once trusted.
+loop success-rate metrics (W-362 — now live via the eval harness above) to
+steer, drives parallel execution (W-360) by choosing batches, and reports
+against the competitive gaps the backlog encodes. v1 operates on the SSOT
+Pipeline project; expand to other target repos once trusted.

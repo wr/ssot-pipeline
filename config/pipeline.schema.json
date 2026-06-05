@@ -208,6 +208,22 @@
         }
       }
     },
+    "sli": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Config for the loop SLI eval harness (W-362) — the weekly scheduled job that aggregates Linear state history + GitHub PR data into a structured success-rate / mean-fix-cycles / stuck-rate digest the AI CEO survey reads. Optional: forks without this block ship the harness dormant.",
+      "properties": {
+        "tracking_issue_id": {
+          "type": "string",
+          "description": "Linear issue identifier (e.g. W-376) where the harness posts its weekly metrics comment and where the CEO survey reads the latest one. When empty, eval-harness.yml no-ops (harness dormant)."
+        },
+        "window_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Rolling window (in days) the harness aggregates over each run. Default 7 (weekly cadence)."
+        }
+      }
+    },
     "project_to_repo": {
       "type": "object",
       "minProperties": 1,
