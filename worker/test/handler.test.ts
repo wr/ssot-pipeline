@@ -705,13 +705,21 @@ describe("Comment-reply routing (W-349)", () => {
     expect(d.client_payload.issue_id).toBe("W-403");
   });
 
-  it("CEO (app actor) non-approval in an agent-session thread → fires linear-replan", async () => {
+  it("app/loop NON-approval inside an agent-session thread → NO dispatch (no implement↔replan self-trigger; W-377)", async () => {
+    // The loop posts its own progress/handoff comments (app-actored) into the session
+    // thread. Re-planning on those churns the loop — so route (b) only routes
+    // APPROVALS; a non-approval app comment in a session thread is a no-op.
     const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
     cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("tighten the semver check first", { actor: { type: "OauthClient" }, data: { id: "ceo-rev", body: "tighten the semver check first", parentId: "session-root" } }), fakeEnv, "t");
-    const d = JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!);
-    expect(d.event_type).toBe("linear-replan");
-    expect(d.client_payload.issue_id).toBe("W-403");
+    await handleCommentCreate(reply("🚧 Workflow file handoff — patch posted for a human to land", { actor: { type: "OauthClient" }, data: { id: "loop-progress", body: "🚧 Workflow file handoff — patch posted for a human to land", parentId: "session-root" } }), fakeEnv, "t");
+    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
+  });
+
+  it("a human NON-approval reply to the plan comment still re-plans (route a unchanged)", async () => {
+    const mock = installFetchMock([planParent, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("also handle the empty case"), fakeEnv, "t");
+    expect(JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!).event_type).toBe("linear-replan");
   });
 
   it("human (User) reply in an agent-session thread (parent = session root) → skipped — `prompted` handles it, no double-fire", async () => {
