@@ -16,10 +16,9 @@ name: ai-ceo
 
 on:
   schedule:
-    # Hourly tick. The gate step (BOOST_UNTIL) only lets it ACT every hour during
-    # the initial boost window; after that, off-peak hourly ticks no-op cheaply and
-    # only the daily 15:00 UTC (~07:00 PT) slot runs. Reverts to once-daily on its
-    # own — no follow-up edit required.
+    # Hourly tick. The gate step decides whether to ACT: HOURLY overnight (until
+    # OVERNIGHT_UNTIL), then every 3 HOURS thereafter (UTC hours divisible by 3).
+    # Off-cadence hourly ticks no-op cheaply. Manual workflow_dispatch always runs.
     - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
@@ -63,19 +62,19 @@ jobs:
           echo "job_start=${JOB_START}" >> "$GITHUB_OUTPUT"
           echo "🔗 trace=${TRACE} ai-ceo (dry_run=${DRY_RUN}, event=${GITHUB_EVENT_NAME:-?})"
 
-          # Hourly boost window (W-358): for the first hours after go-live, cycle
-          # hourly so freshly-delegated plans get reviewed promptly. Past BOOST_UNTIL,
-          # scheduled runs only ACT at the daily slot (15:00 UTC); other hourly ticks
-          # no-op here. Manual workflow_dispatch always proceeds. Self-reverting — no
-          # follow-up edit needed once the window passes.
-          BOOST_UNTIL="2026-06-04T14:45:00Z"
-          DAILY_HOUR="15"
+          # Cadence (W-358): HOURLY overnight, then every 3 HOURS thereafter.
+          # Manual workflow_dispatch always proceeds; only scheduled ticks are gated.
+          OVERNIGHT_UNTIL="2026-06-05T15:00:00Z"  # ~08:00 PT — hourly until then, 3-hourly after
           if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
             NOW_TS=$(date -u +%s)
-            BOOST_TS=$(date -u -d "$BOOST_UNTIL" +%s 2>/dev/null || echo 0)
-            HOUR=$(date -u +%H)
-            if [ "$NOW_TS" -ge "$BOOST_TS" ] && [ "$HOUR" != "$DAILY_HOUR" ]; then
-              echo "::notice::Off-peak hourly tick past boost window (until ${BOOST_UNTIL}); only the ${DAILY_HOUR}:00 UTC daily slot acts. No-op (trace=${TRACE})."
+            ON_TS=$(date -u -d "$OVERNIGHT_UNTIL" +%s 2>/dev/null || echo 0)
+            HOUR=$((10#$(date -u +%H)))   # 10# avoids octal parsing of 08/09
+            if [ "$NOW_TS" -lt "$ON_TS" ]; then
+              echo "trace=${TRACE} overnight window — acting hourly"
+            elif [ $((HOUR % 3)) -eq 0 ]; then
+              echo "trace=${TRACE} steady cadence — acting (every 3h, hour=${HOUR} UTC)"
+            else
+              echo "::notice::Off-cadence hourly tick (hour=${HOUR} UTC; hourly until ${OVERNIGHT_UNTIL}, then every 3h). No-op (trace=${TRACE})."
               echo "enabled=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
