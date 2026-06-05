@@ -610,6 +610,19 @@ describe("Comment-reply routing (W-349)", () => {
   };
   const ghDispatch = { match: (u: string) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() };
 
+  // A reply whose parent is the agent-session ROOT (not a plan comment), on an issue
+  // that DOES have a plan comment — the shape the CEO posts its approval into (Linear
+  // flattens session-thread replies onto the root). W-372 route (b).
+  const sessionRootWithPlan = {
+    match: (u: string, init?: RequestInit) =>
+      u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("comment(id:"),
+    respond: () =>
+      new Response(
+        JSON.stringify({ data: { comment: { id: "session-root", body: "This thread is for an agent session with claude.", issue: { identifier: "W-403", project: { id: SSOT_PROJECT_ID }, comments: { nodes: [{ body: "picking up…" }, { body: `${PLAN_MARKER_LINE}\nthe plan` }] } } } } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+  };
+
   it("approval reply to a plan comment → fires linear-implement", async () => {
     const mock = installFetchMock([planParent, ghDispatch]);
     cleanupFetch = mock.restore;
@@ -679,6 +692,35 @@ describe("Comment-reply routing (W-349)", () => {
     cleanupFetch = mock.restore;
     await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" }, data: { id: "c2", body: "ship it" } }), fakeEnv, "t");
     expect(mock.calls.length).toBe(0);
+  });
+
+  it("CEO (app actor) approval in an agent-session thread whose issue has a plan → fires linear-implement (W-372 route b)", async () => {
+    // The CEO can't reply to the plan comment directly (Linear flattens session-thread
+    // replies onto the session root), so its approval is parented to the root. Route it.
+    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" }, data: { id: "ceo-appr", body: "ship it", parentId: "session-root" } }), fakeEnv, "t");
+    const d = JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!);
+    expect(d.event_type).toBe("linear-implement");
+    expect(d.client_payload.issue_id).toBe("W-403");
+  });
+
+  it("CEO (app actor) non-approval in an agent-session thread → fires linear-replan", async () => {
+    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("tighten the semver check first", { actor: { type: "OauthClient" }, data: { id: "ceo-rev", body: "tighten the semver check first", parentId: "session-root" } }), fakeEnv, "t");
+    const d = JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!);
+    expect(d.event_type).toBe("linear-replan");
+    expect(d.client_payload.issue_id).toBe("W-403");
+  });
+
+  it("human (User) reply in an agent-session thread (parent = session root) → skipped — `prompted` handles it, no double-fire", async () => {
+    // Critical safety: a human's in-session approval already fires AgentSessionEvent
+    // `prompted`; the Comment.create mirror must NOT also dispatch. Gated on non-User.
+    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
+    cleanupFetch = mock.restore;
+    await handleCommentCreate(reply("ship it", { data: { id: "human-sess", body: "ship it", parentId: "session-root" } }), fakeEnv, "t");
+    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
   });
 
   it("reply on an unmapped project → no dispatch", async () => {
