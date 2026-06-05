@@ -213,7 +213,7 @@
                   }
                 }
               },
-              "description": "Fragment-level companion to `protected_paths`. For files listed here, the CEO performs key-level diff checks instead of blanket-blocking the whole file — so safe additive edits (e.g. adding a new top-level block to `config/pipeline.json`) can auto-merge while sensitive sections (the `ceo` block, auth/approval config, the guardrail config itself) stay hard-protected. The protected keys MUST include `$.protected_paths` and `$.protected_json_paths` for any file whose own guardrail config lives inside it — otherwise the CEO could rewrite its own fence."
+              "description": "Fragment-level companion to `protected_paths`. For files listed here, the CEO performs key-level diff checks instead of blanket-blocking the whole file — so safe additive edits (e.g. adding a new top-level block to `config/pipeline.json`) can auto-merge while sensitive sections (the `ceo` block, auth/approval config, the guardrail config itself) stay hard-protected. Paths must resolve against the file's actual structure (e.g. `$.ceo.guardrails.protected_paths`, not `$.protected_paths`); a path that returns `null` on both versions will never trigger escalation and is a no-op."
             }
           }
         },
