@@ -56,21 +56,42 @@ any time (drop back to observe or dormant by flipping the flags).
     "max_pr_files": 25,             // auto-merge size ceiling (files)
     "require_reviewer_approval": true,
     "require_all_checks_green": true,
-    "protected_paths": [ "config/pipeline.json", ".github/workflows/", ... ]
+    "protected_paths": [ ".github/workflows/", ".github/actions/", ... ],
+    "protected_json_paths": [
+      { "file": "config/pipeline.json",
+        "paths": [ "$.ceo", "$.approval_phrases",
+                   "$.protected_paths", "$.protected_json_paths",
+                   "$.approved_user_ids", "$.enforce_approved_users" ] }
+    ]
   },
   "escalation": { "always_escalate": [ ... ] }
 }
 ```
 
 **Auto-merge requires ALL of:** checks green · reviewer-bot APPROVED · additions ≤
-`max_pr_additions` · files ≤ `max_pr_files` · no `protected_paths` touched · not in
-any `always_escalate` category. Any miss → the PR is surfaced to you, never forced.
+`max_pr_additions` · files ≤ `max_pr_files` · no `protected_paths` touched · no
+`protected_json_paths` key changed (see below) · not in any `always_escalate`
+category. Any miss → the PR is surfaced to you, never forced.
 
-`protected_paths` is the blast-radius fence: the CEO will not auto-merge changes to
-its own config, the workflows, the actions, Worker infra, secrets, or security docs.
+`protected_paths` is the blanket blast-radius fence: the CEO will not auto-merge
+changes to the workflows, the actions, Worker infra, secrets, or security docs.
 Those always come to you. Defense in depth: even if a guardrail were misconfigured,
 `main` branch protection still requires green checks + the reviewer-bot approval, so
 the CEO cannot merge anything a human-equivalent gate wouldn't allow.
+
+`protected_json_paths` is the **fragment-level** companion (W-378). Blanket-blocking
+`config/pipeline.json` is too coarse — it *is* the SSOT surface the CEO reads from,
+so most CEO-driven work eventually adds a top-level block to it (e.g. PR #117's
+additive `sli` block). With this rule, the CEO performs a key-level check on listed
+files instead: it `jq`-extracts each protected JSONPath from the base and head
+versions of `file` and only escalates when one of those values actually changed. So
+a PR that purely adds a new top-level section to `config/pipeline.json` and leaves
+`$.ceo`, `$.approval_phrases`, `$.approved_user_ids`, `$.enforce_approved_users`,
+`$.protected_paths`, and `$.protected_json_paths` untouched can auto-merge —
+sensitive sections (the CEO's own block, auth/approval config, the guardrail config
+itself) stay hard-protected. The protected list MUST include both `$.protected_paths`
+and `$.protected_json_paths` so the CEO can't quietly rewrite its own fence; this is
+self-referential by design.
 
 ## How it runs
 
@@ -135,7 +156,8 @@ The CEO runs at full action mode on the daily cron. You rarely need to touch it.
   `ceo.enabled: false` (CEO goes fully dormant) in `config/pipeline.json` and merge.
   Reversible the same way.
 - **Tune its rope:** adjust `max_delegations_per_run`, `max_actions_per_run`,
-  `max_pr_*`, and `protected_paths` to widen or tighten what it does unattended.
+  `max_pr_*`, `protected_paths`, and `protected_json_paths` to widen or tighten what
+  it does unattended.
 
 ## Roadmap
 

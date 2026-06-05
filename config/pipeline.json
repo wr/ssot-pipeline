@@ -39,7 +39,6 @@
       "require_reviewer_approval": true,
       "require_all_checks_green": true,
       "protected_paths": [
-        "config/pipeline.json",
         ".github/workflows/",
         ".github/actions/",
         "worker/wrangler.toml",
@@ -48,6 +47,19 @@
         "**/*.pem",
         "**/secret*",
         "**/.env*"
+      ],
+      "protected_json_paths": [
+        {
+          "file": "config/pipeline.json",
+          "paths": [
+            "$.ceo",
+            "$.approval_phrases",
+            "$.protected_paths",
+            "$.protected_json_paths",
+            "$.approved_user_ids",
+            "$.enforce_approved_users"
+          ]
+        }
       ]
     },
     "escalation": {
