@@ -2,6 +2,8 @@
 
 Step-by-step walkthrough for setting up your own fork of ssot-pipeline. After this you'll have a Worker routing Linear webhooks to your target repos and the full autonomous loop running.
 
+> **Try `./bin/setup` first.** The wizard automates every phase below (prereq check, config edits, Worker deploy, reviewer App creation via the GitHub App Manifest API, token seeding, secrets push) into one idempotent command — usually ~5 minutes to a working loop. See [`docs/quickstart.md`](./quickstart.md). This long-form guide is for debugging a stuck install or doing it by hand.
+
 ## 1. Fork and clone
 
 ```bash

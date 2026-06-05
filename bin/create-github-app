@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""
+Create a GitHub App via the App Manifest API.
+
+Bypasses the manual 20-step "create App in the UI" flow: posts a manifest
+to GitHub, captures the redirect with a temporary code, exchanges it for
+the App credentials, and prints them as JSON.
+
+  https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest
+
+Usage:
+  ./bin/create-github-app --name <name> --permissions <json>
+
+  --name           App name (must be globally unique on GitHub)
+  --permissions    JSON of repo permissions, e.g. '{"pull_requests":"write"}'
+  --events         JSON array of webhook events; default []
+  --webhook-active true|false; default false
+  --homepage       Homepage URL; default https://github.com/<user>
+  --org            If set, create App under this org instead of personal
+  --port           Local callback port; default 8788
+
+On success prints to stdout:
+  {"id": <int>, "slug": "<slug>", "html_url": "...", "pem": "...",
+   "webhook_secret": "...", "client_id": "...", "client_secret": "..."}
+
+Caller is responsible for installing the App after creation. The script
+opens the install page automatically; the user just clicks "Install".
+"""
+
+import argparse
+import http.server
+import json
+import secrets
+import sys
+import threading
+import urllib.parse
+import urllib.request
+import webbrowser
+
+CONVERSION_URL = "https://api.github.com/app-manifests/{code}/conversions"
+
+state_token = ""
+manifest_json = ""
+org_param = ""
+captured: dict = {}
+shutdown_event = threading.Event()
+
+
+class ManifestHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+
+        if parsed.path == "/start":
+            target = "https://github.com/settings/apps/new"
+            if org_param:
+                target = f"https://github.com/organizations/{urllib.parse.quote(org_param)}/settings/apps/new"
+            html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Create GitHub App</title></head>
+<body>
+<p>Redirecting to GitHub to create the App. If nothing happens, click the button.</p>
+<form id="f" method="post" action="{target}?state={state_token}">
+  <input type="hidden" name="manifest" value='{manifest_json.replace("'", "&#39;")}'>
+  <input type="submit" value="Create App on GitHub">
+</form>
+<script>document.getElementById('f').submit();</script>
+</body></html>"""
+            self._respond(200, html, "text/html; charset=utf-8")
+            return
+
+        if parsed.path == "/callback":
+            qs = urllib.parse.parse_qs(parsed.query)
+            if qs.get("state", [""])[0] != state_token:
+                self._respond(400, "<h2>State mismatch — aborting.</h2>")
+                captured["error"] = "state mismatch"
+                shutdown_event.set()
+                return
+            code = qs.get("code", [""])[0]
+            if not code:
+                self._respond(400, "<h2>No code in callback.</h2>")
+                captured["error"] = "no code"
+                shutdown_event.set()
+                return
+            try:
+                req = urllib.request.Request(
+                    CONVERSION_URL.format(code=urllib.parse.quote(code)),
+                    method="POST",
+                    headers={"Accept": "application/vnd.github+json"},
+                )
+                with urllib.request.urlopen(req) as resp:
+                    captured["app"] = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                captured["error"] = f"conversion failed: {e.code} {e.read().decode()}"
+                self._respond(500, f"<h2>Conversion failed: {captured['error']}</h2>")
+                shutdown_event.set()
+                return
+
+            install_url = f"{captured['app']['html_url']}/installations/new"
+            self._respond(200, f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>App created</title></head>
+<body>
+<h2>✅ Created <code>{captured['app']['name']}</code></h2>
+<p>Now install it on the repos that need it:</p>
+<p><a href="{install_url}" target="_blank">Install {captured['app']['name']} →</a></p>
+<p>You can close this tab once you've started the install — the setup script will wait.</p>
+</body></html>""", "text/html; charset=utf-8")
+            shutdown_event.set()
+            return
+
+        self._respond(404, "not found")
+
+    def _respond(self, status, body, ctype="text/html; charset=utf-8"):
+        data = body.encode() if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+
+def main():
+    global state_token, manifest_json, org_param
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--name", required=True)
+    ap.add_argument("--permissions", required=True, help='JSON, e.g. {"pull_requests":"write"}')
+    ap.add_argument("--events", default="[]")
+    ap.add_argument("--webhook-active", default="false", choices=["true", "false"])
+    ap.add_argument("--homepage", default="https://github.com")
+    ap.add_argument("--org", default="")
+    ap.add_argument("--port", type=int, default=8788)
+    args = ap.parse_args()
+
+    try:
+        perms = json.loads(args.permissions)
+        events = json.loads(args.events)
+    except json.JSONDecodeError as e:
+        print(f"Invalid JSON in --permissions or --events: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    state_token = secrets.token_urlsafe(16)
+    org_param = args.org
+    redirect_url = f"http://localhost:{args.port}/callback"
+
+    manifest = {
+        "name": args.name,
+        "url": args.homepage,
+        "redirect_url": redirect_url,
+        "public": False,
+        "default_permissions": perms,
+        "default_events": events,
+        "hook_attributes": {"active": args.webhook_active == "true"},
+    }
+    manifest_json = json.dumps(manifest)
+
+    server = http.server.HTTPServer(("localhost", args.port), ManifestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    start_url = f"http://localhost:{args.port}/start"
+    print(f"\nOpening {start_url} — review the App on GitHub and click Create.", file=sys.stderr)
+    print(f"If it doesn't open, visit that URL manually.\n", file=sys.stderr)
+    webbrowser.open(start_url)
+
+    try:
+        while not shutdown_event.wait(0.2):
+            pass
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        server.shutdown()
+
+    if "error" in captured:
+        print(f"Failed: {captured['error']}", file=sys.stderr)
+        sys.exit(1)
+
+    app = captured["app"]
+    out = {
+        "id": app["id"],
+        "slug": app.get("slug", ""),
+        "html_url": app["html_url"],
+        "pem": app["pem"],
+        "webhook_secret": app.get("webhook_secret") or "",
+        "client_id": app.get("client_id", ""),
+        "client_secret": app.get("client_secret", ""),
+    }
+    json.dump(out, sys.stdout)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
