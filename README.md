@@ -4,6 +4,8 @@ Drives an autonomous coding loop: delegate a Linear issue to `@claude` → Claud
 
 State lives in Linear and GitHub. Nothing to host long-term except a free Cloudflare Worker.
 
+> **Quickstart:** `./bin/setup` walks a fresh fork from zero to a deployed Worker + reviewer App + Linear token in one guided command (~5 min). See [`docs/quickstart.md`](./docs/quickstart.md). Already wired up? `./bin/doctor` checks every credential, endpoint, and per-repo secret in one shot.
+
 ## What's in the box
 
 - **`config/pipeline.json`** — single source of truth for all magic strings (plan marker, MCP URL, state names, approval rules, project→repo routing). Change here, redeploy Worker, all consumers pick it up.

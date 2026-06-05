@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# Interactive fork-setup wizard.
+#
+# Walks a fresh fork from zero to a deployed Worker + a Linear OAuth app
+# token + a reviewer GitHub App + the GitHub Actions variable that ties
+# them together. Each phase prints "✓ already done" or "✓ done" so a
+# partial run can be resumed by re-invoking.
+#
+# Secrets never land in repo files. They live in:
+#   - macOS Keychain (service=ssot-pipeline) for local reuse by
+#     init-target-repo.sh and bin/doctor
+#   - Worker secrets via `wrangler secret put`
+#   - GitHub Actions secrets via `gh secret set`
+#
+# Usage:
+#   ./bin/setup
+#   ./bin/setup --skip-worker     # don't deploy Worker (offline / no CF account yet)
+#   ./bin/setup --skip-apps       # don't create reviewer App (manual setup)
+#
+# Prereqs: gh, jq, node, python3, npx (for wrangler). Run `./bin/doctor`
+# to check what's missing.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG="$REPO_ROOT/config/pipeline.json"
+
+SKIP_WORKER=0
+SKIP_APPS=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-worker) SKIP_WORKER=1 ;;
+    --skip-apps)   SKIP_APPS=1 ;;
+    -h|--help)
+      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) echo "Unknown flag: $arg" >&2; exit 2 ;;
+  esac
+done
+
+# --- shared helpers --------------------------------------------------------
+
+# Colours are nice-to-have but tolerate `set -u` on non-tty.
+if [ -t 1 ]; then
+  C_RESET=$'\033[0m'; C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_HDR=$'\033[1;36m'
+else
+  C_RESET=""; C_OK=""; C_WARN=""; C_HDR=""
+fi
+ok()   { printf "  ${C_OK}✓${C_RESET} %s\n" "$*"; }
+warn() { printf "  ${C_WARN}!${C_RESET} %s\n" "$*"; }
+phase() { printf "\n${C_HDR}== %s ==${C_RESET}\n" "$*"; }
+
+is_macos() { [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; }
+
+# kc_get/kc_set: read/write Keychain entries under service "ssot-pipeline".
+# Falls back gracefully on non-macOS — the value just won't persist across
+# runs, but everything still works in-session.
+kc_get() {
+  local name="$1"
+  if is_macos; then
+    security find-generic-password -w -s ssot-pipeline -a "$name" 2>/dev/null || true
+  fi
+}
+kc_set() {
+  local name="$1" value="$2"
+  if is_macos; then
+    security add-generic-password -U -s ssot-pipeline -a "$name" -w "$value" >/dev/null
+    ok "Stored $name in Keychain"
+  else
+    warn "Not on macOS — $name not persisted; export it as an env var for re-runs"
+  fi
+}
+
+prompt_default() {
+  local label="$1" default_val="$2" out
+  if [ -n "$default_val" ]; then
+    printf "  %s [%s]: " "$label" "$default_val" >&2
+  else
+    printf "  %s: " "$label" >&2
+  fi
+  IFS= read -r out
+  printf "%s" "${out:-$default_val}"
+}
+
+# --- phase 1: prereqs ------------------------------------------------------
+
+phase "Phase 1 — prereqs"
+missing=()
+for cmd in gh jq node python3 git; do
+  if command -v "$cmd" >/dev/null 2>&1; then
+    ok "$cmd present"
+  else
+    warn "$cmd missing"
+    missing+=("$cmd")
+  fi
+done
+# wrangler runs via `npx --yes`, so node is the real requirement.
+if ! command -v npx >/dev/null 2>&1; then
+  warn "npx missing (comes with node)"
+  missing+=("npx")
+fi
+if [ ${#missing[@]} -gt 0 ]; then
+  echo
+  echo "Install the missing tools and re-run. On macOS: brew install ${missing[*]}" >&2
+  exit 1
+fi
+if ! gh auth status >/dev/null 2>&1; then
+  warn "gh not authenticated — running \`gh auth login\`"
+  gh auth login
+fi
+ok "gh authenticated as $(gh api user --jq .login)"
+
+# --- phase 2: detect fork identity ----------------------------------------
+
+phase "Phase 2 — detect this fork"
+if ! FORK_REPO=$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null); then
+  echo "Couldn't detect this fork's GitHub identity. Make sure $REPO_ROOT has an 'origin' remote on GitHub." >&2
+  exit 1
+fi
+FORK_OWNER="${FORK_REPO%%/*}"
+ok "Fork: $FORK_REPO"
+
+# --- phase 3: configure pipeline.json -------------------------------------
+
+phase "Phase 3 — configure config/pipeline.json"
+CUR_BRANCH_PREFIX=$(jq -r '.branch_prefix' "$CONFIG")
+CUR_REVIEWER=$(jq -r '.review_bot_login' "$CONFIG")
+CUR_PROJECT_MAP=$(jq -c '.project_to_repo' "$CONFIG")
+
+DEFAULT_PREFIX="${FORK_OWNER}/"
+NEW_PREFIX=$(prompt_default "branch_prefix" "${CUR_BRANCH_PREFIX:-$DEFAULT_PREFIX}")
+DEFAULT_REVIEWER="${FORK_OWNER}-claude-reviewer[bot]"
+NEW_REVIEWER=$(prompt_default "review_bot_login" "${CUR_REVIEWER:-$DEFAULT_REVIEWER}")
+
+TMPFILE=$(mktemp)
+jq --indent 2 \
+  --arg prefix "$NEW_PREFIX" \
+  --arg reviewer "$NEW_REVIEWER" \
+  --arg owner "$FORK_OWNER" \
+  '.branch_prefix = $prefix
+   | .review_bot_login = $reviewer
+   | .fix_reviewer_logins = [$reviewer, $owner]
+   | (if (.project_to_repo // {}) | length == 0 then . else .project_to_repo = {} end)' \
+  "$CONFIG" > "$TMPFILE"
+if ! diff -q "$CONFIG" "$TMPFILE" >/dev/null 2>&1; then
+  mv "$TMPFILE" "$CONFIG"
+  ok "Updated config/pipeline.json (branch_prefix=$NEW_PREFIX, reviewer=$NEW_REVIEWER)"
+  if [ "$CUR_PROJECT_MAP" != "{}" ]; then
+    warn "Cleared project_to_repo (init-target-repo.sh re-populates per project)"
+  fi
+else
+  rm -f "$TMPFILE"
+  ok "config/pipeline.json already configured"
+fi
+
+# --- phase 4: configure wrangler.toml -------------------------------------
+
+phase "Phase 4 — configure worker/wrangler.toml"
+WRANGLER_TOML="$REPO_ROOT/worker/wrangler.toml"
+CUR_NAME=$(awk -F'"' '/^name *=/ {print $2; exit}' "$WRANGLER_TOML")
+DEFAULT_WORKER_NAME="${FORK_OWNER}-ssot-pipeline"
+NEW_NAME=$(prompt_default "Worker name (becomes <name>.<account>.workers.dev)" "${CUR_NAME:-$DEFAULT_WORKER_NAME}")
+if [ "$NEW_NAME" != "$CUR_NAME" ]; then
+  # Replace the first `name = "..."` line only; subsequent matches (e.g. in
+  # [[durable_objects.bindings]]) must stay put.
+  awk -v new="$NEW_NAME" '
+    !done && /^name *=/ { print "name = \"" new "\""; done=1; next }
+    { print }
+  ' "$WRANGLER_TOML" > "$WRANGLER_TOML.tmp" && mv "$WRANGLER_TOML.tmp" "$WRANGLER_TOML"
+  ok "Set Worker name to $NEW_NAME"
+else
+  ok "Worker name already $CUR_NAME"
+fi
+
+# --- phase 5: deploy Worker ------------------------------------------------
+
+phase "Phase 5 — deploy Cloudflare Worker"
+WORKER_URL=$(kc_get SSOT_WORKER_URL)
+if [ "$SKIP_WORKER" = "1" ]; then
+  warn "--skip-worker passed; skipping deploy"
+elif [ -n "$WORKER_URL" ] && curl -fsS "$WORKER_URL" >/dev/null 2>&1; then
+  ok "Worker already deployed at $WORKER_URL"
+else
+  echo "  Running: cd worker && npx --yes wrangler deploy"
+  (cd "$REPO_ROOT/worker" && npx --yes wrangler deploy) | tee /tmp/ssot-setup-deploy.$$
+  # Wrangler prints the live URL on a line like
+  #   https://<name>.<account>.workers.dev
+  DEPLOYED_URL=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' /tmp/ssot-setup-deploy.$$ | head -n1 || true)
+  rm -f /tmp/ssot-setup-deploy.$$
+  if [ -z "$DEPLOYED_URL" ]; then
+    echo "  Couldn't auto-detect Worker URL from wrangler output." >&2
+    DEPLOYED_URL=$(prompt_default "Paste Worker URL (e.g. https://name.account.workers.dev)" "")
+  fi
+  WORKER_URL="${DEPLOYED_URL%/}/config"
+  ok "Worker URL: $WORKER_URL"
+  kc_set SSOT_WORKER_URL "$WORKER_URL"
+fi
+
+# --- phase 6: create reviewer GitHub App ----------------------------------
+
+phase "Phase 6 — reviewer GitHub App"
+EXISTING_APP_ID=$(kc_get CLAUDE_REVIEWER_APP_ID)
+EXISTING_APP_KEY=$(kc_get CLAUDE_REVIEWER_APP_KEY)
+if [ "$SKIP_APPS" = "1" ]; then
+  warn "--skip-apps passed; skipping App creation"
+elif [ -n "$EXISTING_APP_ID" ] && [ -n "$EXISTING_APP_KEY" ]; then
+  ok "Reviewer App already in Keychain (App ID $EXISTING_APP_ID)"
+else
+  APP_NAME=$(prompt_default "Reviewer App name (must be globally unique)" "${FORK_OWNER}-claude-reviewer")
+  PERMS='{"pull_requests":"write","contents":"read","issues":"write","metadata":"read"}'
+  echo "  Opening browser to create the App (one redirect, no manual permissions UI)…"
+  APP_JSON=$("$SCRIPT_DIR/create-github-app" --name "$APP_NAME" --permissions "$PERMS")
+  APP_ID=$(printf '%s' "$APP_JSON" | jq -r '.id')
+  APP_PEM=$(printf '%s' "$APP_JSON" | jq -r '.pem')
+  APP_HTML=$(printf '%s' "$APP_JSON" | jq -r '.html_url')
+  kc_set CLAUDE_REVIEWER_APP_ID "$APP_ID"
+  kc_set CLAUDE_REVIEWER_APP_KEY "$APP_PEM"
+  ok "Reviewer App created (id=$APP_ID, settings=$APP_HTML)"
+  echo
+  echo "  Now install the App on the target repos you'll wire up — the browser tab"
+  echo "  that just opened has an 'Install' link. (You can come back to this terminal"
+  echo "  while you do that.)"
+  echo "  Press Enter once the install is started…"
+  read -r _
+fi
+
+# --- phase 7: Linear app token --------------------------------------------
+
+phase "Phase 7 — Linear OAuth app token"
+EXISTING_LINEAR=$(kc_get LINEAR_APP_TOKEN)
+if [ -n "$EXISTING_LINEAR" ]; then
+  # Verify it still works before declaring victory.
+  RESP=$(curl -sS -X POST https://api.linear.app/graphql \
+    -H "Authorization: $EXISTING_LINEAR" \
+    -H "Content-Type: application/json" \
+    -d '{"query":"{ viewer { name } }"}' 2>/dev/null || true)
+  VIEWER=$(printf '%s' "$RESP" | jq -r '.data.viewer.name // ""' 2>/dev/null || true)
+  if [ -n "$VIEWER" ] && [ "$VIEWER" != "null" ]; then
+    ok "LINEAR_APP_TOKEN in Keychain authenticates as: $VIEWER"
+  else
+    warn "LINEAR_APP_TOKEN in Keychain is invalid — re-running bin/get-linear-token"
+    EXISTING_LINEAR=""
+  fi
+fi
+if [ -z "$EXISTING_LINEAR" ]; then
+  echo "  See docs/linear-app-setup.md if you don't have the Linear OAuth app yet."
+  echo "  Run bin/get-linear-token in a separate terminal to capture the token,"
+  echo "  then paste it here. (We can't pipe it directly — get-linear-token opens"
+  echo "  its own browser callback.)"
+  echo
+  printf "  Paste LINEAR_APP_TOKEN (or empty to skip): "
+  IFS= read -r LINEAR_TOKEN
+  if [ -n "$LINEAR_TOKEN" ]; then
+    kc_set LINEAR_APP_TOKEN "$LINEAR_TOKEN"
+  else
+    warn "Skipped — set LINEAR_APP_TOKEN before running the loop"
+  fi
+fi
+
+# --- phase 8: Worker secrets ----------------------------------------------
+
+phase "Phase 8 — Worker secrets"
+if [ "$SKIP_WORKER" = "1" ]; then
+  warn "--skip-worker passed; skipping Worker secrets"
+else
+  set_worker_secret() {
+    local name="$1" value="$2"
+    if [ -z "$value" ]; then
+      warn "$name: value not available; set later with 'cd worker && wrangler secret put $name'"
+      return
+    fi
+    (cd "$REPO_ROOT/worker" && printf '%s' "$value" | npx --yes wrangler secret put "$name") >/dev/null
+    ok "Worker secret $name set"
+  }
+  LINEAR_TOKEN_FOR_WORKER=$(kc_get LINEAR_APP_TOKEN)
+  set_worker_secret LINEAR_APP_TOKEN "$LINEAR_TOKEN_FOR_WORKER"
+
+  EXISTING_DISPATCH=$(kc_get GITHUB_DISPATCH_TOKEN)
+  if [ -z "$EXISTING_DISPATCH" ]; then
+    echo "  GITHUB_DISPATCH_TOKEN: a fine-grained PAT with Actions:write + Contents:read"
+    echo "  on every target repo. Create at https://github.com/settings/personal-access-tokens/new"
+    printf "  Paste GITHUB_DISPATCH_TOKEN (or empty to skip): "
+    IFS= read -r DISPATCH_TOKEN
+    if [ -n "$DISPATCH_TOKEN" ]; then
+      kc_set GITHUB_DISPATCH_TOKEN "$DISPATCH_TOKEN"
+      EXISTING_DISPATCH="$DISPATCH_TOKEN"
+    fi
+  fi
+  set_worker_secret GITHUB_DISPATCH_TOKEN "$EXISTING_DISPATCH"
+
+  EXISTING_WEBHOOK=$(kc_get LINEAR_WEBHOOK_SECRET)
+  if [ -z "$EXISTING_WEBHOOK" ]; then
+    echo "  LINEAR_WEBHOOK_SECRET: the app webhook signing secret from Linear"
+    echo "  (Settings → API → your @claude app → copy from the webhook config)"
+    printf "  Paste LINEAR_WEBHOOK_SECRET (or empty to skip): "
+    IFS= read -r WEBHOOK_SECRET
+    if [ -n "$WEBHOOK_SECRET" ]; then
+      kc_set LINEAR_WEBHOOK_SECRET "$WEBHOOK_SECRET"
+      EXISTING_WEBHOOK="$WEBHOOK_SECRET"
+    fi
+  fi
+  set_worker_secret LINEAR_WEBHOOK_SECRET "$EXISTING_WEBHOOK"
+fi
+
+# --- phase 9: GitHub Actions variable on the fork --------------------------
+
+phase "Phase 9 — set SSOT_WORKER_URL on the fork"
+WORKER_URL=$(kc_get SSOT_WORKER_URL)
+if [ -z "$WORKER_URL" ]; then
+  warn "SSOT_WORKER_URL not in Keychain; skipping (set after Worker deploy)"
+elif gh variable list --repo "$FORK_REPO" --json name --jq '.[].name' 2>/dev/null | grep -qx SSOT_WORKER_URL; then
+  ok "SSOT_WORKER_URL already set on $FORK_REPO"
+else
+  gh variable set SSOT_WORKER_URL --repo "$FORK_REPO" --body "$WORKER_URL"
+  ok "Set SSOT_WORKER_URL=$WORKER_URL on $FORK_REPO"
+fi
+
+# --- phase 10: next steps + first target repo -----------------------------
+
+phase "Phase 10 — next steps"
+cat <<EOF
+
+  ✅ Fork setup complete (or as far as you took it this run).
+
+  Still to do manually:
+    • Register the Linear webhook → ${WORKER_URL:-<your Worker URL>}/linear
+      (Linear: Settings → API → your @claude app → Webhook URL)
+    • Run bin/doctor to verify everything is wired up.
+
+  Wire up your first target repo:
+    ./bin/init-target-repo.sh /path/to/target-repo <linear-project-url-or-id>
+
+EOF
+printf "  Run init-target-repo.sh now? [y/N]: "
+IFS= read -r run_init
+if [[ "${run_init:-}" =~ ^[Yy] ]]; then
+  printf "  Target repo path: "; IFS= read -r tgt_path
+  printf "  Linear project URL/ID: "; IFS= read -r tgt_proj
+  if [ -n "$tgt_path" ] && [ -n "$tgt_proj" ]; then
+    "$SCRIPT_DIR/init-target-repo.sh" "$tgt_path" "$tgt_proj"
+  else
+    warn "Skipped — empty path or project."
+  fi
+fi
