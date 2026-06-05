@@ -28,7 +28,23 @@ Steps:
     (b) no debug output (console.log, print, dbg!, etc.), commented-out blocks, or edits unrelated to the plan leaked in;
     (c) the plan's "Verification" (or equivalent) criteria are satisfied by what's actually in the diff.
     If anything is off, fix it before continuing. Don't proceed to commit on a diff you haven't reviewed against the plan.
-3b. Post a milestone comment as a threaded reply under the starting comment: `✏️ edits applied to N files _(trace: <TRACE>)_` where N is the number of files in your diff. Use mcp__linear__save_comment with `parentId` set to the starting comment ID from the per-request context below. If the starting comment ID is empty, skip this milestone.
+3b. **Run the repo's tests before opening a PR (shift-left gate).** Detect the test command from the repo root in priority order, run it, and iterate on failures up to 3 attempts before giving up. The PR opens regardless — but it gets flagged when tests are red so reviewers know.
+
+    Detect the command (first match wins):
+    - `package.json` with a non-trivial `scripts.test` (skip the default `"echo \"Error: no test specified\" && exit 1"` placeholder) → `npm test`
+    - `pytest.ini`, `setup.cfg` with `[tool:pytest]`, or `pyproject.toml` with `[tool.pytest.ini_options]` → `python -m pytest`
+    - `go.mod` → `go test ./...`
+    - `Cargo.toml` → `cargo test`
+    - `Makefile` with a `test:` target (`grep -q "^test:" Makefile`) → `make test`
+    - No match → skip this step; note `⚪ No test command detected` in the PR body (step 7).
+
+    Execute and iterate (cap: 3 attempts):
+    - **Pass** → continue normally; note `✅ Tests pass (<command>)` in the PR body (step 7).
+    - **Fail** → read the failure output, fix the relevant code (only what's needed to make the failing tests pass — don't expand scope), and re-run. The cap counts every attempt, including the first.
+    - **Still failing after 3 attempts** → stop iterating. Add `"tests still failing after 3 iterations: <command>"` to the step 11 `blockers` array, and note `⚠️ Tests red after 3 iterations — see CI for details` in the PR body. Still open the PR (this is the "flagged, not silent" path from the issue) — do NOT take the hard-blocker route for test failures here.
+
+    No new step 11 JSON fields: test status flows through the existing `blockers` array.
+3c. Post a milestone comment as a threaded reply under the starting comment: `✏️ edits applied to N files _(trace: <TRACE>)_` where N is the number of files in your diff. Use mcp__linear__save_comment with `parentId` set to the starting comment ID from the per-request context below. If the starting comment ID is empty, skip this milestone.
 4. Your working branch was already created off `<base>` in step 2a (named `<branch-prefix><issue-id-lowercased>-<short-kebab-slug-from-title>`, e.g. `<branch-prefix>w-65-add-hello-script`). Confirm you're on it before committing: `git branch --show-current`.
 5. Commit your changes. Commit message should focus on *why*. Include `Refs: <ISSUE>` as a trailer (substitute the issue ID from the per-request context below).
 6. Before pushing, check whether your change touches workflow files: run `git diff --name-only origin/<base>...HEAD` (the base branch from step 2a).
@@ -37,13 +53,13 @@ Steps:
      b. Set the Linear issue state back to "In Progress" (mcp__linear__save_issue).
      c. Return the step 11 JSON with `pr_opened: false`, `blocked_on_workflow_files: true`, and a blocker entry naming the workflow file(s). Skip steps 6a–10 entirely and stop here.
    - **Otherwise**: push the branch and continue.
-6a. Post a milestone comment as a threaded reply under the starting comment: `🌿 branch <branch-name> pushed _(trace: <TRACE>)_`. Use `parentId` as in step 3b. Skip if starting comment ID is empty.
+6a. Post a milestone comment as a threaded reply under the starting comment: `🌿 branch <branch-name> pushed _(trace: <TRACE>)_`. Use `parentId` as in step 3c. Skip if starting comment ID is empty.
 7. Open a ready (non-draft) PR with `gh pr create --base <base>` (the base branch from step 2a — omit `--base` only when it's the default branch):
    - Title = issue title
-   - Body: brief summary, test plan checklist, `Closes <ISSUE>` on its own line, and a footer `_(trace: <TRACE>)_` (substitute issue ID and trace ID from the per-request context below).
+   - Body: brief summary, a test-result line from step 3b (one of `✅ Tests pass (<command>)` / `⚠️ Tests red after 3 iterations — see CI for details` / `⚪ No test command detected`), test plan checklist, `Closes <ISSUE>` on its own line, and a footer `_(trace: <TRACE>)_` (substitute issue ID and trace ID from the per-request context below).
 8. Attach the PR URL to the Linear issue (mcp__linear__create_attachment with the PR URL as url and the PR title as title).
 9. Set Linear issue state to the in-review state name from the session-start pipeline config (mcp__linear__save_issue).
-10. Post a Linear comment as a threaded reply under the starting comment: "Ready for review: <PR-url>  _(trace: <TRACE>)_". Use `parentId` as in step 3b. If the starting comment ID is empty, post as a top-level comment instead.
+10. Post a Linear comment as a threaded reply under the starting comment: "Ready for review: <PR-url>  _(trace: <TRACE>)_". Use `parentId` as in step 3c. If the starting comment ID is empty, post as a top-level comment instead.
 
 11. As your FINAL output (after all tool calls), return a JSON object matching this schema:
     {
@@ -53,7 +69,7 @@ Steps:
       "blocked_on_workflow_files": boolean, // true if you took the step 6 handoff (change touches .github/workflows/* — can't be pushed); false otherwise
       "needs_user_input": boolean, // true if you took the "needs user input" path below (parked the issue with a question, no PR); false otherwise
       "summary": string,      // one-sentence summary of what you implemented (max ~200 chars)
-      "blockers": string[]    // anything that blocked you or forced an assumption; [] if clean
+      "blockers": string[]    // anything that blocked you or forced an assumption (including "tests still failing after 3 iterations: <command>" from step 3b); [] if clean
     }
     The action validates this against a JSON schema; the workflow's verify step consumes it via structured_output as an additive cross-check (the world-state assertions remain authoritative). Be honest — if you hit a blocker path below, return `pr_opened: false` with the reason(s) in `blockers` rather than reporting success.
 
