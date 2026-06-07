@@ -579,19 +579,17 @@ export async function postAgentActivity(
 //   - An in-session reply that Linear mirrors into the session thread has the
 //     session root as its parent (not the standalone plan comment), so it also
 //     fails the plan-marker-parent guard — no second dispatch alongside
-//     `prompted`.
-//
-// We deliberately do NOT filter on actor.type. The AI CEO (W-358) drives its own
-// plan approvals, and it posts as the SAME @claude OAuth app as the loop bot —
-// i.e. a non-"User" actor. An earlier belt-and-suspenders `actor.type !== "User"`
-// skip silently dropped every CEO approval, breaking autonomous approve→implement
-// (W-372). The structural guards are load-bearing and sufficient: a non-user actor
-// only routes here if it posts a *threaded reply to a plan-marker comment* with an
-// approval phrase — which the loop bot never does to itself (its own comments are
-// top-level), and which is exactly the CEO's deliberate approval. The optional
-// enforce_approved_users gate still applies when enabled.
+//     `prompted`. The optional actor.type check is belt-and-suspenders on top.
 export async function handleCommentCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
   const comment = event.data as LinearComment | undefined;
+
+  // Belt-and-suspenders: when the webhook tells us who acted, skip non-user
+  // actors (the app's own OauthClient comments, integrations). The plan-marker-
+  // parent guard below is the load-bearing self-trigger defense.
+  if (event.actor?.type && event.actor.type !== "User") {
+    log("info", "comment_skip", { trace, reason: "non_user_actor", actor_type: event.actor.type });
+    return;
+  }
 
   // Only a threaded reply can be a reply to a plan comment.
   if (!comment || !comment.parentId) {

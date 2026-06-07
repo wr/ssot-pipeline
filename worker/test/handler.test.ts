@@ -661,23 +661,10 @@ describe("Comment-reply routing (W-349)", () => {
     expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
   });
 
-  it("the CEO (non-User OauthClient actor) approval reply to a plan comment → fires linear-implement (W-372)", async () => {
-    // The AI CEO posts as the @claude OAuth app (a non-"User" actor). Its deliberate
-    // approval of a plan must route — previously dropped by an actor.type filter.
+  it("the app's own (non-User actor) comment → skipped, never fetches or dispatches", async () => {
     const mock = installFetchMock([planParent, ghDispatch]);
     cleanupFetch = mock.restore;
     await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" } }), fakeEnv, "t");
-    const d = JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!);
-    expect(d.event_type).toBe("linear-implement");
-    expect(d.client_payload.issue_id).toBe("W-400");
-  });
-
-  it("a non-User actor TOP-LEVEL comment (the bot's own plan/progress) → still skipped (structural guard, not actor-type)", async () => {
-    // Self-trigger protection is the parentId/plan-marker guard, NOT actor.type:
-    // a bot comment with no parent never dispatches, even with an approval phrase.
-    const mock = installFetchMock([planParent, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" }, data: { id: "c2", body: "ship it" } }), fakeEnv, "t");
     expect(mock.calls.length).toBe(0);
   });
 
