@@ -572,24 +572,24 @@ export async function postAgentActivity(
 // agent-session-only; revived now that the @claude app webhook also delivers
 // Comment data-change events on the same signing secret — see W-349.)
 //
-// Self-trigger and double-fire safety is STRUCTURAL, not actor-based:
-//   - The loop bot never posts an *approval-phrase reply to a plan comment*, so
-//     its own comments (plans, progress notes, revised plans) never satisfy the
-//     routing conditions below — the Worker can't react to itself.
-//   - A human approving IN-SESSION fires a separate AgentSessionEvent (`prompted`,
-//     handled elsewhere) and is a "User" actor; the Comment.create mirror of that
-//     reply is parented to the session root, so the (b) branch below — gated on a
-//     NON-User actor — skips it. No double-dispatch alongside `prompted`.
+// Self-trigger and double-fire safety is STRUCTURAL, not heuristic:
+//   - Every bot-authored comment (the plan comment, "Follow-up via agent
+//     session", revised plans) is posted TOP-LEVEL, so the parentId + plan-
+//     marker-parent guards below skip them — the Worker never reacts to itself.
+//   - An in-session reply that Linear mirrors into the session thread has the
+//     session root as its parent (not the standalone plan comment), so it also
+//     fails the plan-marker-parent guard — no second dispatch alongside
+//     `prompted`.
 //
-// Two ways a reply routes (W-349 + W-372):
-//   (a) a direct reply to the plan-marker comment (any actor) — the non-session path.
-//   (b) an APP/CEO reply inside an agent-session thread whose issue has a plan
-//       comment. In the agent-session model the plan is nested under the session
-//       root and Linear flattens replies to that root, so the CEO (which shares the
-//       @claude app identity) can't reply to the plan comment directly — (b) is how
-//       its deliberate approval routes. Gated on a non-User actor so human
-//       in-session approvals (User-actored, handled by `prompted`) don't double-fire.
-// The optional enforce_approved_users gate still applies when enabled.
+// We deliberately do NOT filter on actor.type. The AI CEO (W-358) drives its own
+// plan approvals, and it posts as the SAME @claude OAuth app as the loop bot —
+// i.e. a non-"User" actor. An earlier belt-and-suspenders `actor.type !== "User"`
+// skip silently dropped every CEO approval, breaking autonomous approve→implement
+// (W-372). The structural guards are load-bearing and sufficient: a non-user actor
+// only routes here if it posts a *threaded reply to a plan-marker comment* with an
+// approval phrase — which the loop bot never does to itself (its own comments are
+// top-level), and which is exactly the CEO's deliberate approval. The optional
+// enforce_approved_users gate still applies when enabled.
 export async function handleCommentCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
   const comment = event.data as LinearComment | undefined;
 
@@ -613,18 +613,8 @@ export async function handleCommentCreate(event: LinearEvent, env: Env, trace: s
     log("info", "comment_skip", { trace, reason: "parent_fetch_failed", parent_id: comment.parentId });
     return;
   }
-  // (a) direct reply to a plan comment, OR (b) an app/CEO reply in an agent-session
-  // thread whose issue has a plan comment (see header). (b) is gated on a non-User
-  // actor so human in-session approvals (handled by `prompted`) don't double-fire.
-  // Fails closed: if the issue's plan comment can't be confirmed, (b) is false and
-  // we skip — same as before, never a false dispatch.
-  const parentIsPlan = parent.body.startsWith(config.plan_marker);
-  const isAppActor = !!event.actor?.type && event.actor.type !== "User";
-  const issueHasPlan = (parent.issue?.comments?.nodes ?? []).some(
-    (c) => typeof c?.body === "string" && c.body.startsWith(config.plan_marker),
-  );
-  if (!parentIsPlan && !(isAppActor && issueHasPlan)) {
-    log("info", "comment_skip", { trace, reason: "reply_to_non_plan", parent_id: comment.parentId, app_actor: isAppActor, issue_has_plan: issueHasPlan });
+  if (!parent.body.startsWith(config.plan_marker)) {
+    log("info", "comment_skip", { trace, reason: "reply_to_non_plan", parent_id: comment.parentId });
     return;
   }
 
@@ -656,7 +646,7 @@ export async function handleCommentCreate(event: LinearEvent, env: Env, trace: s
 // confirm it's a plan comment and resolve its issue→project). Best-effort:
 // returns null on any failure (caller logs a skip).
 async function fetchComment(commentId: string, env: Env, trace: string): Promise<LinearComment | null> {
-  const query = `query($id: String!) { comment(id: $id) { id body issue { identifier project { id } comments { nodes { body } } } } }`;
+  const query = `query($id: String!) { comment(id: $id) { id body issue { identifier project { id } } } }`;
   try {
     const resp = await fetch("https://api.linear.app/graphql", {
       method: "POST",
@@ -982,6 +972,5 @@ type LinearComment = {
   issue?: {
     identifier?: string;
     project?: { id?: string };
-    comments?: { nodes?: Array<{ body?: string }> };
   };
 };
