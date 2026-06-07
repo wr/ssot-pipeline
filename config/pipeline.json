@@ -18,61 +18,6 @@
   "fix_reviewer_logins": ["wr-claude-reviewer[bot]", "wr"],
   "approved_user_ids": [],
   "enforce_approved_users": false,
-  "ceo": {
-    "enabled": true,
-    "briefing_marker": "## 🧭 CEO Briefing",
-    "chairman_linear_handle": "wells",
-    "chairman_github_login": "wr",
-    "digest_issue_id": "W-358",
-    "autonomy": {
-      "create_issues": true,
-      "refine_and_prioritize": true,
-      "delegate_to_loop": true,
-      "approve_plans": true,
-      "auto_merge": true
-    },
-    "guardrails": {
-      "max_delegations_per_run": 3,
-      "max_actions_per_run": 20,
-      "max_pr_additions": 800,
-      "max_pr_files": 25,
-      "require_reviewer_approval": true,
-      "require_all_checks_green": true,
-      "protected_paths": [
-        ".github/workflows/",
-        ".github/actions/",
-        "worker/wrangler.toml",
-        "worker/.dev.vars*",
-        "docs/security.md",
-        "**/*.pem",
-        "**/secret*",
-        "**/.env*"
-      ],
-      "protected_json_paths": [
-        {
-          "file": "config/pipeline.json",
-          "paths": [
-            "$.ceo",
-            "$.approval_phrases",
-            "$.approved_user_ids",
-            "$.enforce_approved_users"
-          ]
-        }
-      ]
-    },
-    "escalation": {
-      "always_escalate": [
-        "any change to secrets, auth, tokens, or the CEO's own guardrails/config",
-        "deleting or cancelling an issue that a human created",
-        "spending or billing changes",
-        "anything the run is less than confident is safe and reversible"
-      ]
-    }
-  },
-  "sli": {
-    "tracking_issue_id": "W-376",
-    "window_days": 7
-  },
   "project_to_repo": {
     "f9eb7447-31fb-4e02-b46b-7d147f2d0f55": "wr/ssot-pipeline",
     "08a62212-7546-4dee-b7c4-0ffed3fff097": "wr/mojito",

@@ -572,26 +572,24 @@ export async function postAgentActivity(
 // agent-session-only; revived now that the @claude app webhook also delivers
 // Comment data-change events on the same signing secret — see W-349.)
 //
-// Self-trigger and double-fire safety is STRUCTURAL, not actor-based:
-//   - The loop bot never posts an *approval-phrase reply to a plan comment*, so
-//     its own comments (plans, progress notes, revised plans) never satisfy the
-//     routing conditions below — the Worker can't react to itself.
-//   - A human approving IN-SESSION fires a separate AgentSessionEvent (`prompted`,
-//     handled elsewhere) and is a "User" actor; the Comment.create mirror of that
-//     reply is parented to the session root, so the (b) branch below — gated on a
-//     NON-User actor — skips it. No double-dispatch alongside `prompted`.
-//
-// Two ways a reply routes (W-349 + W-372):
-//   (a) a direct reply to the plan-marker comment (any actor) — the non-session path.
-//   (b) an APP/CEO reply inside an agent-session thread whose issue has a plan
-//       comment. In the agent-session model the plan is nested under the session
-//       root and Linear flattens replies to that root, so the CEO (which shares the
-//       @claude app identity) can't reply to the plan comment directly — (b) is how
-//       its deliberate approval routes. Gated on a non-User actor so human
-//       in-session approvals (User-actored, handled by `prompted`) don't double-fire.
-// The optional enforce_approved_users gate still applies when enabled.
+// Self-trigger and double-fire safety is STRUCTURAL, not heuristic:
+//   - Every bot-authored comment (the plan comment, "Follow-up via agent
+//     session", revised plans) is posted TOP-LEVEL, so the parentId + plan-
+//     marker-parent guards below skip them — the Worker never reacts to itself.
+//   - An in-session reply that Linear mirrors into the session thread has the
+//     session root as its parent (not the standalone plan comment), so it also
+//     fails the plan-marker-parent guard — no second dispatch alongside
+//     `prompted`. The optional actor.type check is belt-and-suspenders on top.
 export async function handleCommentCreate(event: LinearEvent, env: Env, trace: string): Promise<void> {
   const comment = event.data as LinearComment | undefined;
+
+  // Belt-and-suspenders: when the webhook tells us who acted, skip non-user
+  // actors (the app's own OauthClient comments, integrations). The plan-marker-
+  // parent guard below is the load-bearing self-trigger defense.
+  if (event.actor?.type && event.actor.type !== "User") {
+    log("info", "comment_skip", { trace, reason: "non_user_actor", actor_type: event.actor.type });
+    return;
+  }
 
   // Only a threaded reply can be a reply to a plan comment.
   if (!comment || !comment.parentId) {
@@ -613,18 +611,8 @@ export async function handleCommentCreate(event: LinearEvent, env: Env, trace: s
     log("info", "comment_skip", { trace, reason: "parent_fetch_failed", parent_id: comment.parentId });
     return;
   }
-  // (a) direct reply to a plan comment, OR (b) an app/CEO reply in an agent-session
-  // thread whose issue has a plan comment (see header). (b) is gated on a non-User
-  // actor so human in-session approvals (handled by `prompted`) don't double-fire.
-  // Fails closed: if the issue's plan comment can't be confirmed, (b) is false and
-  // we skip — same as before, never a false dispatch.
-  const parentIsPlan = parent.body.startsWith(config.plan_marker);
-  const isAppActor = !!event.actor?.type && event.actor.type !== "User";
-  const issueHasPlan = (parent.issue?.comments?.nodes ?? []).some(
-    (c) => typeof c?.body === "string" && c.body.startsWith(config.plan_marker),
-  );
-  if (!parentIsPlan && !(isAppActor && issueHasPlan)) {
-    log("info", "comment_skip", { trace, reason: "reply_to_non_plan", parent_id: comment.parentId, app_actor: isAppActor, issue_has_plan: issueHasPlan });
+  if (!parent.body.startsWith(config.plan_marker)) {
+    log("info", "comment_skip", { trace, reason: "reply_to_non_plan", parent_id: comment.parentId });
     return;
   }
 
@@ -642,32 +630,10 @@ export async function handleCommentCreate(event: LinearEvent, env: Env, trace: s
   // phrase fast-paths to implement; anything else re-plans off this very comment
   // (linear-replan reads its instruction from the comment id — no need to
   // materialize a new comment like the session path does).
-  //
-  // W-382: For route (b) — app-actor reply in a session thread — the body can
-  // be a large patch blob (the workflow-files handoff comment posts a 400+ line
-  // `git format-patch` dump) that incidentally contains approval words like
-  // "ship" or "approved" buried in diff context, causing a self-triggered
-  // implement run. A real approval here is short and deliberate. Restrict the
-  // search window to the first 200 chars for route (b) so a patch blob can't
-  // accidentally match. Route (a) (direct human reply to the plan comment) is
-  // unchanged — long-form human approvals stay searched in full.
-  const isRouteB = !parentIsPlan && isAppActor;
-  const approvalBody = isRouteB ? (comment.body ?? "").slice(0, 200) : (comment.body ?? "");
-  const isApproval = (config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(approvalBody, p));
+  const isApproval = (config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(comment.body ?? "", p));
   if (isApproval) {
     log("info", "comment_dispatch", { trace, issue_id: issueId, event_type: "linear-implement", reason: "approval_phrase", comment_id: comment.id });
     await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace }, env, trace);
-    return;
-  }
-  // Non-approval. ONLY a direct reply to the plan comment (route a — the human
-  // W-349 path) re-plans. A non-approval app/CEO comment in an agent-session thread
-  // (route b) is almost always the LOOP'S OWN comment (a progress note, "edits
-  // applied", a 🚧 workflow-handoff). Re-planning on those self-triggers an
-  // implement↔replan loop — the regression the route-b addition (W-372) introduced,
-  // which churned W-371 ~12 runs before the CEO parked it (W-377). Skip them; a
-  // deliberate CEO change-request rides re-delegation, not a session-thread reply.
-  if (!parentIsPlan) {
-    log("info", "comment_skip", { trace, reason: "session_thread_non_approval_noop", issue_id: issueId, comment_id: comment.id });
     return;
   }
   log("info", "comment_dispatch", { trace, issue_id: issueId, event_type: "linear-replan", comment_id: comment.id });
@@ -678,7 +644,7 @@ export async function handleCommentCreate(event: LinearEvent, env: Env, trace: s
 // confirm it's a plan comment and resolve its issue→project). Best-effort:
 // returns null on any failure (caller logs a skip).
 async function fetchComment(commentId: string, env: Env, trace: string): Promise<LinearComment | null> {
-  const query = `query($id: String!) { comment(id: $id) { id body issue { identifier project { id } comments { nodes { body } } } } }`;
+  const query = `query($id: String!) { comment(id: $id) { id body issue { identifier project { id } } } }`;
   try {
     const resp = await fetch("https://api.linear.app/graphql", {
       method: "POST",
@@ -1004,6 +970,5 @@ type LinearComment = {
   issue?: {
     identifier?: string;
     project?: { id?: string };
-    comments?: { nodes?: Array<{ body?: string }> };
   };
 };

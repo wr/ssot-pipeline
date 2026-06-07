@@ -610,19 +610,6 @@ describe("Comment-reply routing (W-349)", () => {
   };
   const ghDispatch = { match: (u: string) => u.includes("api.github.com"), respond: () => githubDispatchOkResponse() };
 
-  // A reply whose parent is the agent-session ROOT (not a plan comment), on an issue
-  // that DOES have a plan comment — the shape the CEO posts its approval into (Linear
-  // flattens session-thread replies onto the root). W-372 route (b).
-  const sessionRootWithPlan = {
-    match: (u: string, init?: RequestInit) =>
-      u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("comment(id:"),
-    respond: () =>
-      new Response(
-        JSON.stringify({ data: { comment: { id: "session-root", body: "This thread is for an agent session with claude.", issue: { identifier: "W-403", project: { id: SSOT_PROJECT_ID }, comments: { nodes: [{ body: "picking up…" }, { body: `${PLAN_MARKER_LINE}\nthe plan` }] } } } } }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-  };
-
   it("approval reply to a plan comment → fires linear-implement", async () => {
     const mock = installFetchMock([planParent, ghDispatch]);
     cleanupFetch = mock.restore;
@@ -674,92 +661,11 @@ describe("Comment-reply routing (W-349)", () => {
     expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
   });
 
-  it("the CEO (non-User OauthClient actor) approval reply to a plan comment → fires linear-implement (W-372)", async () => {
-    // The AI CEO posts as the @claude OAuth app (a non-"User" actor). Its deliberate
-    // approval of a plan must route — previously dropped by an actor.type filter.
+  it("the app's own (non-User actor) comment → skipped, never fetches or dispatches", async () => {
     const mock = installFetchMock([planParent, ghDispatch]);
     cleanupFetch = mock.restore;
     await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" } }), fakeEnv, "t");
-    const d = JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!);
-    expect(d.event_type).toBe("linear-implement");
-    expect(d.client_payload.issue_id).toBe("W-400");
-  });
-
-  it("a non-User actor TOP-LEVEL comment (the bot's own plan/progress) → still skipped (structural guard, not actor-type)", async () => {
-    // Self-trigger protection is the parentId/plan-marker guard, NOT actor.type:
-    // a bot comment with no parent never dispatches, even with an approval phrase.
-    const mock = installFetchMock([planParent, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" }, data: { id: "c2", body: "ship it" } }), fakeEnv, "t");
     expect(mock.calls.length).toBe(0);
-  });
-
-  it("CEO (app actor) approval in an agent-session thread whose issue has a plan → fires linear-implement (W-372 route b)", async () => {
-    // The CEO can't reply to the plan comment directly (Linear flattens session-thread
-    // replies onto the session root), so its approval is parented to the root. Route it.
-    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" }, data: { id: "ceo-appr", body: "ship it", parentId: "session-root" } }), fakeEnv, "t");
-    const d = JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!);
-    expect(d.event_type).toBe("linear-implement");
-    expect(d.client_payload.issue_id).toBe("W-403");
-  });
-
-  it("app/loop NON-approval inside an agent-session thread → NO dispatch (no implement↔replan self-trigger; W-377)", async () => {
-    // The loop posts its own progress/handoff comments (app-actored) into the session
-    // thread. Re-planning on those churns the loop — so route (b) only routes
-    // APPROVALS; a non-approval app comment in a session thread is a no-op.
-    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("🚧 Workflow file handoff — patch posted for a human to land", { actor: { type: "OauthClient" }, data: { id: "loop-progress", body: "🚧 Workflow file handoff — patch posted for a human to land", parentId: "session-root" } }), fakeEnv, "t");
-    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
-  });
-
-  it("app/loop session-thread comment with a workflow-handoff patch blob containing approval words deep in the body → NO dispatch (W-382)", async () => {
-    // The loop's workflow-files handoff comment embeds a 400+ line `git format-patch`
-    // dump. Diffs routinely contain words like "ship", "approved", "accepted" in code,
-    // YAML comments, or commit messages — those previously slipped past route (b)'s
-    // non-approval guard because the approval check scanned the whole body. With the
-    // W-382 fix, route (b) only searches the first 200 chars (where a real CEO
-    // approval would sit), so an approval word buried at char 300+ no longer fires
-    // a self-triggered implement run.
-    const prelude = "🪪 Workflow-files patch (manual landing required):\n\nThis change touches .github/workflows/* which I can't push (the loop's git identity withholds the workflow scope by design). Patch below for a human to land.\n\n```diff\n"; // ~250 chars
-    const blobWithApproval = "diff --git a/x b/x\n@@\n+# we should ship it once approved\n".repeat(20);
-    const longHandoff = prelude + blobWithApproval;
-    expect(longHandoff.indexOf("ship it")).toBeGreaterThan(200); // sanity: the approval word is past the slice window
-    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply(longHandoff, { actor: { type: "OauthClient" }, data: { id: "loop-handoff", body: longHandoff, parentId: "session-root" } }), fakeEnv, "t");
-    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
-  });
-
-  it("short CEO approval in a session thread (≤ 200 chars) still fires linear-implement (W-382 — route b not over-tightened)", async () => {
-    // Sibling guard to the W-382 test above: confirms the 200-char approval-search
-    // window doesn't regress the legitimate route-b use case. The CEO's deliberate
-    // in-session approval is short ("ship it" = 7 chars) and sits at the start of
-    // the body, well inside the window.
-    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" }, data: { id: "ceo-short", body: "ship it", parentId: "session-root" } }), fakeEnv, "t");
-    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
-    expect(dispatch).toBeDefined();
-    expect(JSON.parse(dispatch!.body!).event_type).toBe("linear-implement");
-  });
-
-  it("a human NON-approval reply to the plan comment still re-plans (route a unchanged)", async () => {
-    const mock = installFetchMock([planParent, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("also handle the empty case"), fakeEnv, "t");
-    expect(JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!).event_type).toBe("linear-replan");
-  });
-
-  it("human (User) reply in an agent-session thread (parent = session root) → skipped — `prompted` handles it, no double-fire", async () => {
-    // Critical safety: a human's in-session approval already fires AgentSessionEvent
-    // `prompted`; the Comment.create mirror must NOT also dispatch. Gated on non-User.
-    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("ship it", { data: { id: "human-sess", body: "ship it", parentId: "session-root" } }), fakeEnv, "t");
-    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
   });
 
   it("reply on an unmapped project → no dispatch", async () => {
