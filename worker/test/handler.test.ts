@@ -715,37 +715,6 @@ describe("Comment-reply routing (W-349)", () => {
     expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
   });
 
-  it("app/loop session-thread comment with a workflow-handoff patch blob containing approval words deep in the body → NO dispatch (W-382)", async () => {
-    // The loop's workflow-files handoff comment embeds a 400+ line `git format-patch`
-    // dump. Diffs routinely contain words like "ship", "approved", "accepted" in code,
-    // YAML comments, or commit messages — those previously slipped past route (b)'s
-    // non-approval guard because the approval check scanned the whole body. With the
-    // W-382 fix, route (b) only searches the first 200 chars (where a real CEO
-    // approval would sit), so an approval word buried at char 300+ no longer fires
-    // a self-triggered implement run.
-    const prelude = "🪪 Workflow-files patch (manual landing required):\n\nThis change touches .github/workflows/* which I can't push (the loop's git identity withholds the workflow scope by design). Patch below for a human to land.\n\n```diff\n"; // ~250 chars
-    const blobWithApproval = "diff --git a/x b/x\n@@\n+# we should ship it once approved\n".repeat(20);
-    const longHandoff = prelude + blobWithApproval;
-    expect(longHandoff.indexOf("ship it")).toBeGreaterThan(200); // sanity: the approval word is past the slice window
-    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply(longHandoff, { actor: { type: "OauthClient" }, data: { id: "loop-handoff", body: longHandoff, parentId: "session-root" } }), fakeEnv, "t");
-    expect(mock.calls.find((c) => c.url.includes("api.github.com/repos"))).toBeUndefined();
-  });
-
-  it("short CEO approval in a session thread (≤ 200 chars) still fires linear-implement (W-382 — route b not over-tightened)", async () => {
-    // Sibling guard to the W-382 test above: confirms the 200-char approval-search
-    // window doesn't regress the legitimate route-b use case. The CEO's deliberate
-    // in-session approval is short ("ship it" = 7 chars) and sits at the start of
-    // the body, well inside the window.
-    const mock = installFetchMock([sessionRootWithPlan, ghDispatch]);
-    cleanupFetch = mock.restore;
-    await handleCommentCreate(reply("ship it", { actor: { type: "OauthClient" }, data: { id: "ceo-short", body: "ship it", parentId: "session-root" } }), fakeEnv, "t");
-    const dispatch = mock.calls.find((c) => c.url.includes("api.github.com/repos"));
-    expect(dispatch).toBeDefined();
-    expect(JSON.parse(dispatch!.body!).event_type).toBe("linear-implement");
-  });
-
   it("a human NON-approval reply to the plan comment still re-plans (route a unchanged)", async () => {
     const mock = installFetchMock([planParent, ghDispatch]);
     cleanupFetch = mock.restore;

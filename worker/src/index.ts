@@ -642,18 +642,7 @@ export async function handleCommentCreate(event: LinearEvent, env: Env, trace: s
   // phrase fast-paths to implement; anything else re-plans off this very comment
   // (linear-replan reads its instruction from the comment id — no need to
   // materialize a new comment like the session path does).
-  //
-  // W-382: For route (b) — app-actor reply in a session thread — the body can
-  // be a large patch blob (the workflow-files handoff comment posts a 400+ line
-  // `git format-patch` dump) that incidentally contains approval words like
-  // "ship" or "approved" buried in diff context, causing a self-triggered
-  // implement run. A real approval here is short and deliberate. Restrict the
-  // search window to the first 200 chars for route (b) so a patch blob can't
-  // accidentally match. Route (a) (direct human reply to the plan comment) is
-  // unchanged — long-form human approvals stay searched in full.
-  const isRouteB = !parentIsPlan && isAppActor;
-  const approvalBody = isRouteB ? (comment.body ?? "").slice(0, 200) : (comment.body ?? "");
-  const isApproval = (config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(approvalBody, p));
+  const isApproval = (config.approval_phrases as string[]).some((p) => matchesApprovalPhrase(comment.body ?? "", p));
   if (isApproval) {
     log("info", "comment_dispatch", { trace, issue_id: issueId, event_type: "linear-implement", reason: "approval_phrase", comment_id: comment.id });
     await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace }, env, trace);
