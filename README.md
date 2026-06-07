@@ -11,7 +11,6 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 - **`config/pipeline.json`** — single source of truth for all magic strings (plan marker, MCP URL, state names, approval rules, project→repo routing). Change here, redeploy Worker, all consumers pick it up.
 - **`.github/workflows/`** — five reusable workflows (`linear-pickup`, `linear-implement`, `linear-replan`, `pr-review`, `pr-fix`). Target repos consume them via `uses:`. Auto-close on PR merge is handled by Linear's native GitHub integration (PR body uses `Closes W-XX`).
 - **`worker/`** — Cloudflare Worker that receives Linear webhooks, generates trace IDs, fires GitHub `repository_dispatch` events. Also serves `GET /config` so workflows can read the shared config at run time.
-- **`.github/workflows/ai-ceo.yml`** — the autonomous **AI CEO** (W-358): a scheduled, *dormant-by-default* orchestration layer that surveys product health, acts within hard guardrails in `config/pipeline.json` → `ceo`, and posts a briefing to the human chairman in Linear. Meta-repo only. See [`docs/ai-ceo.md`](./docs/ai-ceo.md).
 - **`templates/ssot.yml`** — the ~20-line stub a target repo drops in to wire itself up.
 - **`bin/init-target-repo.sh`** — one-command setup for a new target repo.
 - **`docs/`** — identity setup walkthroughs (Linear OAuth app, GitHub Apps) and architecture notes.

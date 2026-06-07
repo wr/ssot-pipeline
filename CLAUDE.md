@@ -13,7 +13,6 @@ See `README.md` for the user-facing intro and setup. See `docs/architecture.md` 
 ## Working in this repo
 
 - All three reusable workflows in `.github/workflows/` use `workflow_call`. Don't add `on:` triggers that fire them in this repo unless they're for dogfooding the loop here. Target repos call them.
-- **The AI CEO (`ai-ceo.yml`) is the one intentionally `on:`-triggered orchestration workflow** — it operates *on the product* (dogfooding), is meta-repo only, and stays dormant until `ceo.enabled` in `config/pipeline.json` is true. Its behavior lives in the `ai-ceo` plugin skill + the `ceo` config block (skills/config over YAML, per the house rules). Full autonomy is the design but `auto_merge`/`approve_plans` ship `false` so authority ramps in stages. See `docs/ai-ceo.md`. The human is **chairman of the board** — the CEO runs day-to-day, escalates big calls.
 - The Worker (`worker/`) is a pure router — no state, no DB. State always lives in Linear and GitHub.
 - **Magic strings live in `config/pipeline.json`** — plan marker, MCP URL, state names, approval rules, project→repo routing. The Worker imports it at build time and serves it at `GET /config`; workflows curl that endpoint and inject values into prompts. Don't duplicate config values into workflow YAML or Worker code — read from here.
 - **Trace IDs are mandatory** — every Worker-initiated webhook gets an 8-char trace ID. Propagate it through `client_payload.trace_id`, echo in workflows, embed in Linear comments. Makes cross-system debugging tractable.
