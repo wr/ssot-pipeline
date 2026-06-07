@@ -648,17 +648,6 @@ export async function handleCommentCreate(event: LinearEvent, env: Env, trace: s
     await fireDispatch(repo, "linear-implement", { issue_id: issueId, trace_id: trace }, env, trace);
     return;
   }
-  // Non-approval. ONLY a direct reply to the plan comment (route a — the human
-  // W-349 path) re-plans. A non-approval app/CEO comment in an agent-session thread
-  // (route b) is almost always the LOOP'S OWN comment (a progress note, "edits
-  // applied", a 🚧 workflow-handoff). Re-planning on those self-triggers an
-  // implement↔replan loop — the regression the route-b addition (W-372) introduced,
-  // which churned W-371 ~12 runs before the CEO parked it (W-377). Skip them; a
-  // deliberate CEO change-request rides re-delegation, not a session-thread reply.
-  if (!parentIsPlan) {
-    log("info", "comment_skip", { trace, reason: "session_thread_non_approval_noop", issue_id: issueId, comment_id: comment.id });
-    return;
-  }
   log("info", "comment_dispatch", { trace, issue_id: issueId, event_type: "linear-replan", comment_id: comment.id });
   await fireDispatch(repo, "linear-replan", { issue_id: issueId, comment_id: comment.id, trace_id: trace }, env, trace);
 }
