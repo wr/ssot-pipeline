@@ -273,7 +273,7 @@ else
 
   EXISTING_DISPATCH=$(kc_get GITHUB_DISPATCH_TOKEN)
   if [ -z "$EXISTING_DISPATCH" ]; then
-    echo "  GITHUB_DISPATCH_TOKEN: a fine-grained PAT with Actions:write + Contents:read"
+    echo "  GITHUB_DISPATCH_TOKEN: a fine-grained PAT with Contents:write"
     echo "  on every target repo. Create at https://github.com/settings/personal-access-tokens/new"
     printf "  Paste GITHUB_DISPATCH_TOKEN (or empty to skip): "
     IFS= read -r DISPATCH_TOKEN

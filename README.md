@@ -52,7 +52,7 @@ Per-repo, setup is one command:
 
 The Linear arg accepts a full project URL (`https://linear.app/<ws>/project/<slug>`), a bare URL slug (`<slug>`), or the UUID — copy whichever is easiest from the Linear UI.
 
-Prereqs: `gh` CLI authenticated, `jq` installed, the `<your-handle>-claude-reviewer` GitHub App installed on the target repo, and four secrets resolvable via env var, macOS Keychain, or interactive prompt: `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`. One optional fifth secret, `GITHUB_DISPATCH_TOKEN` (a fine-grained PAT with `Actions: write` + `Contents: read` on the target repo), unlocks the verify-step auto-replan loop — without it the workflows still work; they just flip straight to `Stuck` on a verify failure instead of self-correcting. To skip prompts every run, seed Keychain once:
+Prereqs: `gh` CLI authenticated, `jq` installed, the `<your-handle>-claude-reviewer` GitHub App installed on the target repo, and four secrets resolvable via env var, macOS Keychain, or interactive prompt: `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`. One optional fifth secret, `GITHUB_DISPATCH_TOKEN` (a fine-grained PAT with `Contents: write` on the target repo — the scope GitHub requires for `POST /repos/.../dispatches`), unlocks the verify-step auto-replan loop — without it the workflows still work; they just flip straight to `Stuck` on a verify failure instead of self-correcting. To skip prompts every run, seed Keychain once:
 
 ```
 security add-generic-password -s ssot-pipeline -a LINEAR_APP_TOKEN -w '<token>'
