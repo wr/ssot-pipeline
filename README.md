@@ -11,7 +11,7 @@ State lives in Linear and GitHub. Nothing to host long-term except a free Cloudf
 - **`config/pipeline.json`** — single source of truth for all magic strings (plan marker, MCP URL, state names, approval rules, project→repo routing). Change here, redeploy Worker, all consumers pick it up.
 - **`.github/workflows/`** — five reusable workflows (`linear-pickup`, `linear-implement`, `linear-replan`, `pr-review`, `pr-fix`). Target repos consume them via `uses:`. Auto-close on PR merge is handled by Linear's native GitHub integration (PR body uses `Closes W-XX`).
 - **`worker/`** — Cloudflare Worker that receives Linear webhooks, generates trace IDs, fires GitHub `repository_dispatch` events. Also serves `GET /config` so workflows can read the shared config at run time.
-- **`templates/ssot.yml`** — the ~20-line stub a target repo drops in to wire itself up.
+- **`templates/ssot.yml`** — the stub a target repo drops in to wire all five reusable workflows via `uses:`.
 - **`bin/init-target-repo.sh`** — one-command setup for a new target repo.
 - **`docs/`** — identity setup walkthroughs (Linear OAuth app, GitHub Apps) and architecture notes.
 
@@ -26,7 +26,7 @@ Before deploying a fork, update `config/pipeline.json` with your own values — 
 | `branch_prefix` | Your preferred branch prefix, e.g. `yourname/` |
 | `review_bot_login` | `<your-handle>-claude-reviewer[bot]` — the GitHub App you create for reviews |
 | `fix_reviewer_logins` | `["<your-handle>-claude-reviewer[bot]"]` — same App, plus your own GitHub login if you want human reviews to trigger auto-fix too |
-| `approval_phrases` | Reply phrases/emoji in an agent session that count as approval to implement (default `["ship it", "lgtm", "looks good", "approved", "go for it", "👍", "✅"]`) |
+| `approval_phrases` | Reply phrases/emoji in an agent session that count as approval to implement. Default covers the obvious ones (`ship it`, `lgtm`, `looks good`, `approve`/`approved`, `go for it`, `send it`, `make it so`, 👍, ✅, 🚀, …) — see `config/pipeline.json` for the full list |
 | `pr_fix_max_attempts` | Hard cap on auto-fix iterations per PR before flipping to Stuck (default `2`) |
 | `planning_state`, `plan_review_state`, `in_progress_state`, `in_review_state`, `stuck_state` | Names of the Linear workflow states the pipeline drives. Defaults match the names this repo uses — change them only if your Linear workspace uses different state names |
 | `linear_mcp_url`, `linear_mcp_transport` | Linear's MCP endpoint. Defaults are correct unless Linear changes them |
@@ -52,7 +52,7 @@ Per-repo, setup is one command:
 
 The Linear arg accepts a full project URL (`https://linear.app/<ws>/project/<slug>`), a bare URL slug (`<slug>`), or the UUID — copy whichever is easiest from the Linear UI.
 
-Prereqs: `gh` CLI authenticated, `jq` installed, the `<your-handle>-claude-reviewer` GitHub App installed on the target repo, and four secrets resolvable via env var, macOS Keychain, or interactive prompt: `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`. To skip prompts every run, seed Keychain once:
+Prereqs: `gh` CLI authenticated, `jq` installed, the `<your-handle>-claude-reviewer` GitHub App installed on the target repo, and four secrets resolvable via env var, macOS Keychain, or interactive prompt: `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`. One optional fifth secret, `GITHUB_DISPATCH_TOKEN` (a fine-grained PAT with `Actions: write` + `Contents: read` on the target repo), unlocks the verify-step auto-replan loop — without it the workflows still work; they just flip straight to `Stuck` on a verify failure instead of self-correcting. To skip prompts every run, seed Keychain once:
 
 ```
 security add-generic-password -s ssot-pipeline -a LINEAR_APP_TOKEN -w '<token>'
@@ -68,7 +68,7 @@ If the target dir isn't a git repo (or has no GitHub remote), the script prompts
 
 The script does everything end-to-end:
 1. If the target isn't a GitHub-tracked repo yet, prompts for visibility (private/public/abort) and runs `git init` + initial commit + `gh repo create --push`.
-2. Installs `templates/ssot.yml` → `<repo>/.github/workflows/ssot.yml` (wires up `linear-pickup`, `linear-implement`, `pr-review`)
+2. Installs `templates/ssot.yml` → `<repo>/.github/workflows/ssot.yml` (wires up all five reusable workflows: `linear-pickup`, `linear-implement`, `linear-replan`, `pr-review`, `pr-fix`)
 3. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
 4. Sets repo secrets `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`
 5. Commits + pushes the target repo's stub + CLAUDE.md changes
