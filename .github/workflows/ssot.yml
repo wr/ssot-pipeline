@@ -58,7 +58,10 @@ on:
   pull_request:
     types: [opened, synchronize]
   pull_request_review:
-    types: [submitted]
+    # `dismissed` is how pr-fix signals "stale CHANGES_REQUESTED was cleared,
+    # re-run pr-review on the new HEAD" — `pull_request: synchronize` from a
+    # bot push isn't reliable on its own (W-379).
+    types: [submitted, dismissed]
 
 # GITHUB_TOKEN permissions. Reusable workflows can only request <= what the
 # caller grants — keep this block aligned with the union of needs across all
@@ -106,7 +109,9 @@ jobs:
       GITHUB_DISPATCH_TOKEN: ${{ secrets.GITHUB_DISPATCH_TOKEN }}
 
   pr-review:
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'dismissed')
     uses: ./.github/workflows/pr-review.yml
     with:
       config_url: ${{ vars.SSOT_WORKER_URL }}
