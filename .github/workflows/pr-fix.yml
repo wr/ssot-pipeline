@@ -457,6 +457,33 @@ jobs:
           # Hand off to the linear-stuck-flip composite below.
           echo "outcome=failed_with_issue" >> "$GITHUB_OUTPUT"
 
+      - name: Dismiss stale CHANGES_REQUESTED review
+        # Verified fix pushed → dismiss the reviewer-bot's prior CHANGES_REQUESTED
+        # review(s). The dismissal fires `pull_request_review: dismissed`, which
+        # ssot.yml routes to pr-review on the new HEAD — closing the loop that
+        # `pull_request: synchronize` doesn't reliably close after a bot push (W-379).
+        # Safe no-op when REVIEW_IDS is empty (no prior CHANGES_REQUESTED to dismiss).
+        if: steps.gate.outputs.skip == 'false' && steps.cap.outputs.exceeded == 'false' && steps.verify.outputs.outcome == 'passed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEW_BOT_LOGIN: ${{ steps.cfg.outputs.review_bot_login }}
+        run: |
+          set -euo pipefail
+          REVIEW_IDS=$(gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+            | jq -r --arg u "$REVIEW_BOT_LOGIN" '.[] | select(.user.login == $u and .state == "CHANGES_REQUESTED") | .id')
+          if [ -z "$REVIEW_IDS" ]; then
+            echo "trace=${TRACE} no stale CHANGES_REQUESTED reviews by ${REVIEW_BOT_LOGIN} to dismiss"
+            exit 0
+          fi
+          for rid in $REVIEW_IDS; do
+            MSG="Superseded by fix commit(s) from claude[bot] (pr-fix, trace=${TRACE})."
+            gh api -X PUT "repos/${REPO}/pulls/${PR}/reviews/${rid}/dismissals" \
+              -f "message=$MSG" \
+              -f event=DISMISS > /dev/null \
+              && echo "dismissed review $rid" \
+              || echo "::warning::failed to dismiss review $rid (trace=${TRACE})"
+          done
+
       - name: Stuck-flip on verify failure
         if: always() && steps.gate.outputs.skip == 'false' && steps.cap.outputs.exceeded == 'false' && steps.verify.outputs.outcome == 'failed_with_issue'
         uses: wr/ssot-pipeline/.github/actions/linear-stuck-flip@main
