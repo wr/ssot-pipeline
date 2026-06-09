@@ -30,7 +30,8 @@
 #   CLAUDE_REVIEWER_APP_ID   GitHub App ID for your reviewer App (review identity, distinct from claude[bot] so APPROVE/REQUEST_CHANGES isn't blocked as self-review; see docs/github-app-setup.md)
 #   CLAUDE_REVIEWER_APP_KEY  Private key (PEM) for the same App
 # Optional repo secrets:
-#   GITHUB_DISPATCH_TOKEN    Fine-grained PAT (Actions: write on this repo). When
+#   GITHUB_DISPATCH_TOKEN    Fine-grained PAT (Contents: write on this repo — the scope
+#                            POST /repos/.../dispatches requires for fine-grained PATs). When
 #                            set, linear-implement's verify step can auto-fire
 #                            linear-replan on recognized verify failures
 #                            instead of going straight to Stuck, AND linear-replan
