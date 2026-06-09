@@ -222,6 +222,14 @@ async function handleLinearWebhook(req: Request, env: Env, ctx: ExecutionContext
       await handleCommentCreate(event, env, trace);
       return new Response("ok");
     }
+    // Linear's native GitHub integration creates issues automatically but doesn't
+    // assign them to a project. Look up the project by inverting project_to_repo
+    // against the source GitHub repo so the issue lands where dispatch can find
+    // it (W-391). Fires-and-forgets inside waitUntil so the ack stays fast.
+    if (event.type === "Issue" && event.action === "create") {
+      handleIssueCreate(event, env, trace, ctx);
+      return new Response("ok");
+    }
     log("info", "webhook_ignored", { trace, event_type: event.type, event_action: event.action });
     return new Response("ok");
   } catch (err) {
@@ -669,6 +677,127 @@ async function fetchComment(commentId: string, env: Env, trace: string): Promise
   }
 }
 
+// --- Issue.create project tagging (W-391) -----------------------------------
+//
+// Linear's native GitHub integration creates a Linear issue when a GitHub issue
+// is opened, but the integration doesn't pick a project for it — so the issue
+// lands in the team backlog with no project, where the loop can't see it (the
+// dispatch path needs project→repo to fire). This handler patches that gap:
+// when an Integration-actor Issue.create arrives with no project AND the source
+// GitHub URL maps to a configured repo, set the project via Linear's API.
+//
+// Guards (each is a quiet skip, not an error):
+//   - actor.type === "Integration" — skip user/OauthClient-created issues; those
+//     are either intentional (a human chose no project) or handled elsewhere.
+//   - data.project?.id absent — if the integration already set a project, do
+//     nothing. The handler is idempotent against retries.
+//   - data.externalUrl parses to a github.com/<owner>/<repo>/... — anything else
+//     is a non-GitHub source we can't map.
+//   - lookupProject(repo) returns a configured projectId — otherwise the repo
+//     isn't wired to the pipeline.
+//
+// Runs fire-and-forget under ctx.waitUntil so the 200 ack returns before the
+// Linear API roundtrip — same pattern as handleAgentSessionEvent.
+export function handleIssueCreate(event: LinearEvent, env: Env, trace: string, ctx: ExecutionContext): void {
+  if (event.actor?.type !== "Integration") {
+    log("info", "issue_create_skip", { trace, reason: "non_integration_actor", actor_type: event.actor?.type ?? null });
+    return;
+  }
+  const issue = event.data as LinearIssue | undefined;
+  if (!issue?.id) {
+    log("info", "issue_create_skip", { trace, reason: "no_issue_id" });
+    return;
+  }
+  if (issue.project?.id) {
+    log("info", "issue_create_skip", { trace, reason: "project_already_set", issue_id: issue.id, project_id: issue.project.id });
+    return;
+  }
+  const repo = parseGithubRepo(issue.externalUrl ?? null);
+  if (!repo) {
+    log("info", "issue_create_skip", { trace, reason: "no_github_external_url", issue_id: issue.id, external_url: issue.externalUrl ?? null });
+    return;
+  }
+  const projectId = lookupProject(repo);
+  if (!projectId) {
+    log("info", "issue_create_skip", { trace, reason: "no_project_mapping", issue_id: issue.id, repo });
+    return;
+  }
+  ctx.waitUntil(
+    updateIssueProject(issue.id, projectId, env, trace)
+      .then((ok) => {
+        if (ok) log("info", "issue_project_set", { trace, issue_id: issue.id, project_id: projectId, repo });
+      })
+      .catch((err) =>
+        log("error", "issue_project_set_failed", {
+          trace,
+          issue_id: issue.id,
+          project_id: projectId,
+          repo,
+          error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        }),
+      ),
+  );
+}
+
+// Invert project_to_repo to map a GitHub `owner/repo` back to its configured
+// Linear projectId, or null if the repo isn't in the map. The reverse map is
+// rebuilt per call — the config is tiny and this keeps lookupProject hot-
+// reloadable if config is ever swapped at runtime.
+export function lookupProject(repo: string): string | null {
+  const map = config.project_to_repo as Record<string, string>;
+  for (const [projectId, configuredRepo] of Object.entries(map)) {
+    if (configuredRepo === repo) return projectId;
+  }
+  return null;
+}
+
+// Extract `owner/repo` from a GitHub issue/PR URL. Returns null for non-GitHub
+// hosts or malformed URLs so callers can quietly skip them.
+export function parseGithubRepo(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    if (u.hostname !== "github.com" && u.hostname !== "www.github.com") return null;
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+    return `${parts[0]}/${parts[1]}`;
+  } catch {
+    return null;
+  }
+}
+
+// Set an issue's project via Linear's GraphQL API. Returns true on success and
+// false on any failure (the caller logs the outcome).
+async function updateIssueProject(issueId: string, projectId: string, env: Env, trace: string): Promise<boolean> {
+  const mutation = `mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }`;
+  try {
+    const resp = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.LINEAR_APP_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query: mutation, variables: { id: issueId, input: { projectId } } }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      log("error", "issue_update_failed", { trace, issue_id: issueId, status: resp.status, body: text });
+      return false;
+    }
+    const data = JSON.parse(text) as { data?: { issueUpdate?: { success?: boolean } }; errors?: unknown };
+    if (data.errors) {
+      log("error", "issue_update_graphql_errors", { trace, issue_id: issueId, errors: data.errors });
+      return false;
+    }
+    return data.data?.issueUpdate?.success === true;
+  } catch (err) {
+    log("error", "issue_update_error", {
+      trace,
+      issue_id: issueId,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
+    return false;
+  }
+}
+
 // GET /verify?issue=W-NN&kind=pickup|implement — assert a workflow's expected
 // post-conditions and return { pass, reason }. Used by the ssot-agents plugin's
 // Stop hook to let the agent self-correct a wrong outcome *before* the run ends.
@@ -971,4 +1100,13 @@ type LinearComment = {
     identifier?: string;
     project?: { id?: string };
   };
+};
+
+// Issue data-change payload (event.data when type === "Issue"). `externalUrl`
+// carries the source GitHub issue URL when Linear's GitHub integration created
+// the issue; absent for regular user-created issues.
+export type LinearIssue = {
+  id: string;
+  externalUrl?: string | null;
+  project?: { id?: string } | null;
 };
