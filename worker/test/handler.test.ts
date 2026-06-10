@@ -9,10 +9,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   handleAgentSessionEvent,
   handleCommentCreate,
+  handleIssueCreate,
   isAgentSessionPayload,
   log,
+  lookupProject,
   lookupRepo,
   matchesApprovalPhrase,
+  parseGithubRepo,
   postAgentActivity,
   resolveRepo,
   verifySignature,
@@ -30,6 +33,7 @@ import {
 
 // JSON fixtures — kept as strings so we can sign them byte-for-byte.
 import agentSessionCreated from "./fixtures/webhook_agent_session_created.json";
+import issueCreateGithub from "./fixtures/webhook_issue_create_github.json";
 
 const SECRET = "test-secret";
 const SSOT_REPO = "wr/ssot-pipeline";
@@ -692,6 +696,144 @@ describe("Comment-reply routing (W-349)", () => {
     const resp = await SELF.fetch(req);
     expect(resp.status).toBe(200);
     expect(JSON.parse(mock.calls.find((c) => c.url.includes("api.github.com/repos"))!.body!).event_type).toBe("linear-implement");
+  });
+});
+
+// --- Issue.create project tagging (W-391) -----------------------------------
+// Linear's GitHub integration creates Linear issues without a project. This
+// handler inverts project_to_repo against the source GitHub repo so the issue
+// lands where dispatch can find it. All guards are quiet skips, not errors.
+
+describe("Issue.create project tagging (W-391)", () => {
+  const fakeEnv = { LINEAR_APP_TOKEN: "linear-token", GITHUB_DISPATCH_TOKEN: "gh-token" } as unknown as Env;
+  const MOJITO_PROJECT_ID = "08a62212-7546-4dee-b7c4-0ffed3fff097";
+
+  function capturingCtx(): { ctx: ExecutionContext; settled: () => Promise<void> } {
+    const promises: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (p: Promise<unknown>) => { promises.push(p); },
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+    return { ctx, settled: async () => { await Promise.all(promises); } };
+  }
+
+  const issueUpdateOk = {
+    match: (u: string, init?: RequestInit) =>
+      u.includes("api.linear.app/graphql") && typeof init?.body === "string" && init.body.includes("issueUpdate"),
+    respond: () =>
+      new Response(JSON.stringify({ data: { issueUpdate: { success: true } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  };
+
+  it("parseGithubRepo handles github URLs, ignores non-github hosts and malformed input", () => {
+    expect(parseGithubRepo("https://github.com/wr/mojito/issues/42")).toBe("wr/mojito");
+    expect(parseGithubRepo("https://www.github.com/wr/mojito/pull/9")).toBe("wr/mojito");
+    expect(parseGithubRepo("https://gitlab.com/wr/mojito/issues/1")).toBeNull();
+    expect(parseGithubRepo("https://example.com")).toBeNull();
+    expect(parseGithubRepo("not a url")).toBeNull();
+    expect(parseGithubRepo(null)).toBeNull();
+  });
+
+  it("lookupProject returns the configured projectId for a known repo, null otherwise", () => {
+    expect(lookupProject(SSOT_REPO)).toBe(SSOT_PROJECT_ID);
+    expect(lookupProject("wr/mojito")).toBe(MOJITO_PROJECT_ID);
+    expect(lookupProject("wr/unmapped")).toBeNull();
+  });
+
+  it("Integration actor, no project, mapped repo → fires issueUpdate with the projectId", async () => {
+    const mock = installFetchMock([issueUpdateOk]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    handleIssueCreate(issueCreateGithub as unknown as LinearEvent, fakeEnv, "tr391", ctx);
+    await settled();
+
+    const call = mock.calls.find((c) => c.url.includes("api.linear.app/graphql"));
+    expect(call).toBeDefined();
+    const body = JSON.parse(call!.body!);
+    expect(body.query).toContain("issueUpdate");
+    expect(body.variables.id).toBe(issueCreateGithub.data.id);
+    expect(body.variables.input.projectId).toBe(MOJITO_PROJECT_ID);
+  });
+
+  it("non-Integration actor (User) → skipped, no API call", async () => {
+    const mock = installFetchMock([issueUpdateOk]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    handleIssueCreate(
+      { ...(issueCreateGithub as unknown as LinearEvent), actor: { type: "User" } },
+      fakeEnv,
+      "tr",
+      ctx,
+    );
+    await settled();
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("issue already has a project → skipped, no API call (idempotent)", async () => {
+    const mock = installFetchMock([issueUpdateOk]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    const event = {
+      ...(issueCreateGithub as unknown as LinearEvent),
+      data: { ...(issueCreateGithub.data as object), project: { id: "some-existing-project" } },
+    } as LinearEvent;
+    handleIssueCreate(event, fakeEnv, "tr", ctx);
+    await settled();
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("non-GitHub externalUrl → skipped, no API call", async () => {
+    const mock = installFetchMock([issueUpdateOk]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    const event = {
+      ...(issueCreateGithub as unknown as LinearEvent),
+      data: { ...(issueCreateGithub.data as object), externalUrl: "https://gitlab.com/wr/mojito/issues/42" },
+    } as LinearEvent;
+    handleIssueCreate(event, fakeEnv, "tr", ctx);
+    await settled();
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("repo not in project_to_repo → skipped, no API call", async () => {
+    const mock = installFetchMock([issueUpdateOk]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    const event = {
+      ...(issueCreateGithub as unknown as LinearEvent),
+      data: { ...(issueCreateGithub.data as object), externalUrl: "https://github.com/wr/unmapped/issues/1" },
+    } as LinearEvent;
+    handleIssueCreate(event, fakeEnv, "tr", ctx);
+    await settled();
+    expect(mock.calls.length).toBe(0);
+  });
+
+  it("Linear API failure → logged but does not throw out of waitUntil", async () => {
+    const mock = installFetchMock([
+      {
+        match: (u) => u.includes("api.linear.app/graphql"),
+        respond: () => new Response("server error", { status: 500 }),
+      },
+    ]);
+    cleanupFetch = mock.restore;
+    const { ctx, settled } = capturingCtx();
+    handleIssueCreate(issueCreateGithub as unknown as LinearEvent, fakeEnv, "tr", ctx);
+    await expect(settled()).resolves.toBeUndefined();
+    expect(mock.calls.find((c) => c.url.includes("api.linear.app/graphql"))).toBeDefined();
+  });
+
+  it("end-to-end: POST /linear Issue.create → 200 + issueUpdate fired", async () => {
+    const mock = installFetchMock([issueUpdateOk]);
+    cleanupFetch = mock.restore;
+    const body = JSON.stringify(issueCreateGithub);
+    const req = await buildWebhookRequest({ body, linearEvent: "Issue" });
+    const resp = await SELF.fetch(req);
+    expect(resp.status).toBe(200);
+    // Drain waitUntil so the assertion below sees the call.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mock.calls.find((c) => c.url.includes("api.linear.app/graphql"))).toBeDefined();
   });
 });
 
