@@ -201,23 +201,29 @@ jobs:
         if: steps.skip_check.outputs.skip != 'true'
         id: effort
         run: |
+          # Budgets account for ~13 turns of fixed overhead before the first
+          # finding (read CLAUDE.md; fetch PR + diff + files + prior reviews +
+          # review comments; CI-check) plus one turn per inline comment (the
+          # GitHub MCP posts comments one at a time — no batch API). 20 was too
+          # tight: large/multi-finding PRs hit error_max_turns and never emit
+          # the structured-output verdict, false-failing the review. See W-449.
           case "${EFFORT}" in
             low)
               # Sonnet: fast/cheap pass for docs or tiny PRs
               echo "model=claude-sonnet-4-6" >> "$GITHUB_OUTPUT"
-              echo "max_turns=10" >> "$GITHUB_OUTPUT"
+              echo "max_turns=15" >> "$GITHUB_OUTPUT"
               ;;
             high)
               # Opus: deeper reasoning for security-sensitive or large PRs;
               # costs ~3x Sonnet — only use when quality gain justifies it
               echo "model=claude-opus-4-7" >> "$GITHUB_OUTPUT"
-              echo "max_turns=30" >> "$GITHUB_OUTPUT"
+              echo "max_turns=50" >> "$GITHUB_OUTPUT"
               ;;
             *)
               # medium (default): Sonnet gives the right cost/latency tradeoff
               # for routine reviews; revisit if Opus quality wins prove worth the spend
               echo "model=claude-sonnet-4-6" >> "$GITHUB_OUTPUT"
-              echo "max_turns=20" >> "$GITHUB_OUTPUT"
+              echo "max_turns=35" >> "$GITHUB_OUTPUT"
               ;;
           esac
 
