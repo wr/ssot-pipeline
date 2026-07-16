@@ -69,9 +69,9 @@ If the target dir isn't a git repo (or has no GitHub remote), the script prompts
 The script does everything end-to-end:
 1. If the target isn't a GitHub-tracked repo yet, prompts for visibility (private/public/abort) and runs `git init` + initial commit + `gh repo create --push`.
 2. Installs `templates/ssot.yml` → `<repo>/.github/workflows/ssot.yml` (wires up all five reusable workflows: `linear-pickup`, `linear-implement`, `linear-replan`, `pr-review`, `pr-fix`)
-3. Appends a `## Source of truth` block to `<repo>/CLAUDE.md` (creates the file if missing)
+3. Appends a `## Source of truth` block to `<repo>/AGENTS.md` (the SSOT, read by Claude and Codex; creates it if missing) + a stub `<repo>/CLAUDE.md` that `@`-imports it
 4. Sets repo secrets `CLAUDE_CODE_OAUTH_TOKEN`, `LINEAR_APP_TOKEN`, `CLAUDE_REVIEWER_APP_ID`, `CLAUDE_REVIEWER_APP_KEY`
-5. Commits + pushes the target repo's stub + CLAUDE.md changes
+5. Commits + pushes the target repo's stub + AGENTS.md/CLAUDE.md changes
 6. `jq`-edits this repo's `config/pipeline.json` to add the `project_to_repo` mapping, commits, and pushes to `main` — the `deploy-worker` Action then redeploys the Worker automatically
 
 Re-runs are idempotent: each step skips itself if its effect is already in place.
