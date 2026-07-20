@@ -40,7 +40,7 @@ jobs:
       - name: Trace
         run: echo "🔗 trace=${TRACE:-<none>} issue=${ISSUE} agent_session=${AGENT_SESSION_ID:-<none>}"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
