@@ -1,5 +1,7 @@
 # ssot-pipeline
 
+> **Retired (2026-10-02).** No repos use this pipeline any more: wr/mojito and wr/enshittifier dropped their stubs, the Cloudflare Worker is deleted, and the repo is archived. The code is kept for reference.
+
 Drives an autonomous coding loop: delegate a Linear issue to `@claude` → Claude plans and posts it as an in-session elicitation → you reply "approve" in the session → Claude implements → PR opens → Claude reviews → (auto-fix if changes requested) → you merge → ship. Plus auto-review on every PR in target repos.
 
 State lives in Linear and GitHub. Nothing to host long-term except a free Cloudflare Worker.
