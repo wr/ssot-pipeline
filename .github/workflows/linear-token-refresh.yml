@@ -34,7 +34,6 @@ jobs:
           owner: wr
           repositories: |
             ssot-pipeline
-            mojito
             enshittifier
 
       - name: Refresh Linear token + redistribute
@@ -44,7 +43,7 @@ jobs:
           CSEC: ${{ secrets.LINEAR_CLIENT_SECRET }}
           RT: ${{ secrets.LINEAR_REFRESH_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          REPOS: "wr/ssot-pipeline wr/mojito wr/enshittifier"
+          REPOS: "wr/ssot-pipeline wr/enshittifier"
           META_REPO: wr/ssot-pipeline
         run: |
           set -euo pipefail

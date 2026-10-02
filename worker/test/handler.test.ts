@@ -706,7 +706,7 @@ describe("Comment-reply routing (W-349)", () => {
 
 describe("Issue.create project tagging (W-391)", () => {
   const fakeEnv = { LINEAR_APP_TOKEN: "linear-token", GITHUB_DISPATCH_TOKEN: "gh-token" } as unknown as Env;
-  const MOJITO_PROJECT_ID = "08a62212-7546-4dee-b7c4-0ffed3fff097";
+  const ENSHITTIFIER_PROJECT_ID = "824aa5a0-f41d-4d70-8332-240c24df9224";
 
   function capturingCtx(): { ctx: ExecutionContext; settled: () => Promise<void> } {
     const promises: Promise<unknown>[] = [];
@@ -728,9 +728,9 @@ describe("Issue.create project tagging (W-391)", () => {
   };
 
   it("parseGithubRepo handles github URLs, ignores non-github hosts and malformed input", () => {
-    expect(parseGithubRepo("https://github.com/wr/mojito/issues/42")).toBe("wr/mojito");
-    expect(parseGithubRepo("https://www.github.com/wr/mojito/pull/9")).toBe("wr/mojito");
-    expect(parseGithubRepo("https://gitlab.com/wr/mojito/issues/1")).toBeNull();
+    expect(parseGithubRepo("https://github.com/wr/enshittifier/issues/42")).toBe("wr/enshittifier");
+    expect(parseGithubRepo("https://www.github.com/wr/enshittifier/pull/9")).toBe("wr/enshittifier");
+    expect(parseGithubRepo("https://gitlab.com/wr/enshittifier/issues/1")).toBeNull();
     expect(parseGithubRepo("https://example.com")).toBeNull();
     expect(parseGithubRepo("not a url")).toBeNull();
     expect(parseGithubRepo(null)).toBeNull();
@@ -738,7 +738,7 @@ describe("Issue.create project tagging (W-391)", () => {
 
   it("lookupProject returns the configured projectId for a known repo, null otherwise", () => {
     expect(lookupProject(SSOT_REPO)).toBe(SSOT_PROJECT_ID);
-    expect(lookupProject("wr/mojito")).toBe(MOJITO_PROJECT_ID);
+    expect(lookupProject("wr/enshittifier")).toBe(ENSHITTIFIER_PROJECT_ID);
     expect(lookupProject("wr/unmapped")).toBeNull();
   });
 
@@ -754,7 +754,7 @@ describe("Issue.create project tagging (W-391)", () => {
     const body = JSON.parse(call!.body!);
     expect(body.query).toContain("issueUpdate");
     expect(body.variables.id).toBe(issueCreateGithub.data.id);
-    expect(body.variables.input.projectId).toBe(MOJITO_PROJECT_ID);
+    expect(body.variables.input.projectId).toBe(ENSHITTIFIER_PROJECT_ID);
   });
 
   it("non-Integration actor (User) → skipped, no API call", async () => {
@@ -790,7 +790,7 @@ describe("Issue.create project tagging (W-391)", () => {
     const { ctx, settled } = capturingCtx();
     const event = {
       ...(issueCreateGithub as unknown as LinearEvent),
-      data: { ...(issueCreateGithub.data as object), externalUrl: "https://gitlab.com/wr/mojito/issues/42" },
+      data: { ...(issueCreateGithub.data as object), externalUrl: "https://gitlab.com/wr/enshittifier/issues/42" },
     } as LinearEvent;
     handleIssueCreate(event, fakeEnv, "tr", ctx);
     await settled();
